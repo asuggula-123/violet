@@ -24,7 +24,8 @@ describe('Brain turn', () => {
     expect(calls[0]!.messages).toEqual([{ role: 'user', content: 'hi' }]);
     expect(calls[1]!.messages).toEqual([
       { role: 'user', content: 'hi' },
-      { role: 'assistant', content: 'Hello Alex\n\nDigest line' },
+      // M4 (K1): a digest quotes third parties, so history shows a placeholder, never its text.
+      { role: 'assistant', content: 'Hello Alex\n\n[daily digest sent]' },
       { role: 'user', content: 'second' },
     ]);
     expect(calls[2]!.messages.at(-1)).toEqual({ role: 'user', content: 'third' });

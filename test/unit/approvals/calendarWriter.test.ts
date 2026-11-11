@@ -104,6 +104,40 @@ describe('CalendarWriter (I6)', () => {
     expect(w.calendar.writes.map((x) => x.op)).toEqual(['create', 'delete']);
   });
 
+  it('I7 (M4): an event the provider made but reported as failed (lost response) is found by its key and undone', async () => {
+    const original = w.calendar.createEvent.bind(w.calendar);
+    w.calendar.createEvent = async (...args) => {
+      await original(...args);
+      throw new Error('timeout after the write');
+    };
+    const a = await w.app.approvals!.request(w.alex.agent.id, { kind: 'calendar_event', payload: dinner });
+    await approve(a.id);
+    expect((await w.app.approvals!.calendar.executeApproved(a.id)).ok).toBe(false);
+    expect(w.calendar.eventsOf(w.alex.owner.id)).toEqual([]);
+    expect(w.calendar.writes.map((x) => x.op)).toEqual(['create', 'delete']);
+    const rows = await w.db.query<{ deleted_at: Date | null }>('SELECT deleted_at FROM calendar_writes WHERE approval_id = $1', [a.id]);
+    expect(rows.rows.length).toBe(1);
+    expect(rows.rows[0]!.deleted_at).not.toBeNull();
+  });
+
+  it('I7 (M4): a crash between createEvent and recording its id leaves an intent row; a retry completes it once', async () => {
+    const a = await w.app.approvals!.request(w.alex.agent.id, { kind: 'calendar_event', payload: dinner });
+    await approve(a.id);
+    // Simulate the crash: the intent row exists, the provider made the event, the id never got stored.
+    const key = `approval:${a.id}:0`;
+    await w.db.query(`INSERT INTO calendar_writes (id, owner_id, approval_id, event_id, idempotency_key, created_at) VALUES ('cw1', $1, $2, NULL, $3, $4)`, [
+      w.alex.owner.id,
+      a.id,
+      key,
+      w.clock.now(),
+    ]);
+    await w.calendar.createEvent(w.alex.owner.id, { title: 'Dinner', start: new Date(dinner.start), end: new Date(dinner.end) }, key);
+    expect(await w.app.approvals!.calendar.executeApproved(a.id)).toEqual({ ok: true, eventIds: ['fake-event-1'] });
+    expect(w.calendar.eventsOf(w.alex.owner.id)).toHaveLength(1);
+    expect(await w.app.approvals!.calendar.undo(a.id)).toBe(1);
+    expect(w.calendar.eventsOf(w.alex.owner.id)).toEqual([]);
+  });
+
   it('undo deletes the recorded events once (compensation)', async () => {
     const a = await w.app.approvals!.request(w.alex.agent.id, { kind: 'calendar_event', payload: dinner });
     await w.ownerSays(w.alex, 'yes');

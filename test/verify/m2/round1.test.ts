@@ -217,6 +217,10 @@ describe('M2 round 1: Brain', () => {
       const turn = (await w.actions({ action: 'brain.turn' })).at(-1)!;
       expect(turn.detail.tainted, name).toBe(true);
     }
+    // M4 (K1): the replies above were written in tainted turns, so they taint any turn whose
+    // history holds them. find_free_time alone does not taint: check it in a fresh world.
+    await w.close();
+    w = await createTestWorld();
     scriptBrain(w, w.alex, [[toolUse('t', 'find_free_time', { from: '2026-11-09T00:00:00-05:00', to: '2026-11-10T00:00:00-05:00' })], 'ok']);
     await w.ownerSays(w.alex, 'free?');
     expect((await w.actions({ action: 'brain.turn' })).at(-1)!.detail.tainted).toBe(false);

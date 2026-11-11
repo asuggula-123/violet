@@ -37,8 +37,7 @@ Migrations run automatically at every boot (`src/main.ts`, before the server lis
 under a Postgres advisory lock). There is no separate migration step. The migrations are
 the plain SQL files in `src/db/migrations/`, applied in order and recorded in
 `schema_migrations`: `001_core.sql`, `002_approvals.sql`, `003_google.sql`,
-`005_flags.sql`, `006_transport.sql` (`004` is reserved for the agent-to-agent tables and
-does not exist yet). Production has no
+`004_a2a.sql` (the agent-to-agent tables), `005_flags.sql`, `006_transport.sql`. Production has no
 fallback database: with `NODE_ENV=production` (set in the image) and no `DATABASE_URL`,
 the server and every CLI stop with `DATABASE_URL is missing: ...` instead of using an
 embedded database.
@@ -150,7 +149,8 @@ npm run owner:add:prod -- --household Home --name Sam --tz Europe/London \
   --transport telegram --agent-address <sam bot id> --bot-username <sam bot username>
 ```
 
-`--tz` is an IANA zone. The second call finds the household by name. Each call prints the
+`--tz` is an IANA zone. The second call finds the household by name (exact match, or pass
+the household id printed by the first call). Each call prints the
 owner id and a pairing code (shown once, valid 24 hours). A call prints
 `Household: <name> (<id>)` first. If a call says the database is missing
 (`DATABASE_URL is missing: ...`), check `printenv DATABASE_URL NODE_ENV` in that shell.
@@ -179,7 +179,31 @@ agent keeps its history and pending approvals, so pair only the same owner again
 `action_log` records `pairing.reset` and `pairing.code_issued` (never the code). Locally:
 `npm run pairing:reissue -- --agent <agent id>`.
 
-## 9. Connect Google (optional)
+## 9. Agent-to-agent (between owners of one household)
+
+Nothing to set up beyond step 7: an owner asks their Violet to sort something out with
+another owner ("ask Sam about dinner on Friday") and the two agents talk.
+
+- **Same household only.** An agent can talk only to agents whose owners are in the same
+  household (I12). `owner:add` puts an owner in the household named by `--household`: use
+  the same name (exact match) or the household id for both owners. A different spelling
+  creates a second household, and the agents cannot reach each other. Agents are found by
+  the other owner's first name.
+- **Nothing leaves the server for agent-to-agent traffic.** The agents' conversation is
+  rows in Postgres and jobs on the server's own queue; no Telegram message, email or other
+  network message carries it. What does go out: the Envoy's model calls (Claude API, model
+  `VIOLET_ENVOY_MODEL`, default `VIOLET_MODEL`) and, with Google connected, free/busy reads
+  inside the conversation's time window.
+- **What owners see [real people]:** the exact text their Violet sent the other agent
+  (`Talking to Sam's Violet about …`), questions the other side's Violet needs answered (at
+  once), one yes/no prompt per owner for any outcome (both must say yes before anything is
+  booked: separate events, no invites), and digest lines for conversations started, closed,
+  stuck or booked. Either owner can ask for the verbatim transcript.
+- **Without Google** (production): an outcome both owners approve is not booked; both get
+  `Couldn't book …: Google isn't connected on this server. Nothing was booked.`
+- Limits: 3 open conversations and 10 new ones a day per pair of agents, 12 messages per side.
+
+## 10. Connect Google (optional)
 
 **[real people]** In `fly ssh console --app <app>`:
 
@@ -191,7 +215,7 @@ Send the printed link to that owner (single use, valid 15 minutes). They sign in
 own Google account and approve. The page says "Connected. You can close this tab." and
 `action_log` records `google.connected`.
 
-## 10. Day to day
+## 11. Day to day
 
 - **Health:** `curl https://<app>.fly.dev/healthz`, `fly status`, `fly checks list`,
   `fly logs --app <app>`.
@@ -199,7 +223,9 @@ own Google account and approve. The page says "Connected. You can close this tab
   any case). The agent sends one ack and then nothing to anyone (no reply, flag, digest or
   stranger reply); the scheduler skips it. `resume` undoes it: approval prompts held
   meanwhile are sent, and messages strangers left meanwhile are in the next digest.
-- **What owners receive unasked [real people]:** approval prompts at once; urgent flags
+- **What owners receive unasked [real people]:** approval prompts at once, and so are
+  agent-to-agent questions and results (`Waiting for Sam.`, `Booked: …`, `Sam said no to: …`),
+  even at night and outside the daily budget; urgent flags
   (e.g. a calendar conflict, Google needing a reconnect) at most 3 per owner-local day and
   never between 22:00 and 07:00 (held until 07:00); everything else in one daily digest at
   the owner's digest hour (18:00 local, the `owners.digest_hour` column; nothing is sent when

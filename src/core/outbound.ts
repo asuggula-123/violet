@@ -19,7 +19,7 @@ export interface OutboundGateway {
   sendToOwner(
     agentId: string,
     text: string,
-    opts: { purpose: Exclude<OutboundPurpose, 'canned'>; buttons?: OutboundButton[] },
+    opts: { purpose: Exclude<OutboundPurpose, 'canned'>; buttons?: OutboundButton[]; meta?: OwnerMessageMeta },
   ): Promise<SentToOwner | null>;
   sendCanned(agentId: string, contactId: string, key: CannedKey): Promise<void>;
 }
@@ -41,6 +41,11 @@ interface Deps {
 
 type OwnerPurpose = Exclude<OutboundPurpose, 'canned'>;
 
+/** Stored on the outbound `messages` row. `tainted`: the text quotes third parties or was written in a tainted Brain turn (M4). */
+export interface OwnerMessageMeta {
+  tainted?: boolean;
+}
+
 export function createOutbound(deps: Deps): { gateway: OutboundGateway; control: ControlChannel } {
   const { transport, repos, actionLog, log } = deps;
 
@@ -54,6 +59,7 @@ export function createOutbound(deps: Deps): { gateway: OutboundGateway; control:
     text: string,
     purpose: OwnerPurpose,
     buttons: OutboundButton[] | undefined,
+    meta: OwnerMessageMeta = {},
   ): Promise<SentToOwner | null> {
     if (!agent.owner_address) return suppressed(agent.id, 'no_owner', { purpose });
     let sent: { transportMessageId: string };
@@ -76,7 +82,7 @@ export function createOutbound(deps: Deps): { gateway: OutboundGateway; control:
       body: text,
       purpose,
       transportMessageId: sent.transportMessageId,
-      meta: buttons && buttons.length > 0 ? { buttons } : {},
+      meta: { ...(meta.tainted ? { tainted: true } : {}), ...(buttons && buttons.length > 0 ? { buttons } : {}) },
     });
     await actionLog.write({
       agentId: agent.id,
@@ -108,11 +114,11 @@ export function createOutbound(deps: Deps): { gateway: OutboundGateway; control:
   }
 
   const gateway: OutboundGateway = Object.freeze({
-    async sendToOwner(agentId: string, text: string, opts: { purpose: OwnerPurpose; buttons?: OutboundButton[] }) {
+    async sendToOwner(agentId: string, text: string, opts: { purpose: OwnerPurpose; buttons?: OutboundButton[]; meta?: OwnerMessageMeta }) {
       if ((opts.purpose as OutboundPurpose) === 'canned') throw new Error('canned texts go through sendCanned');
       const agent = await loadAgent(agentId);
       if (agent.paused) return suppressed(agent.id, 'paused', { purpose: opts.purpose });
-      return deliverToOwner(agent, text, opts.purpose, opts.buttons);
+      return deliverToOwner(agent, text, opts.purpose, opts.buttons, opts.meta);
     },
 
     async sendCanned(agentId: string, contactId: string, key: CannedKey) {

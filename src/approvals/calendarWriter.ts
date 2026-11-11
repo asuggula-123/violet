@@ -44,8 +44,8 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
   const approvals = approvalsRepo(db, clock);
 
   async function writesOf(approvalId: string) {
-    const res = await db.query<{ id: string; owner_id: string; event_id: string; deleted_at: Date | null }>(
-      'SELECT id, owner_id, event_id, deleted_at FROM calendar_writes WHERE approval_id = $1 ORDER BY seq',
+    const res = await db.query<{ id: string; owner_id: string; event_id: string | null; idempotency_key: string; deleted_at: Date | null }>(
+      'SELECT id, owner_id, event_id, idempotency_key, deleted_at FROM calendar_writes WHERE approval_id = $1 ORDER BY seq',
       [approvalId],
     );
     return res.rows;
@@ -77,7 +77,7 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
       if (!approval) return refuse(null, approvalId, 'unknown_approval');
       if (approval.status === 'executed') {
         await flagBooked(approval, deps.kind(approval.kind));
-        return { ok: true, eventIds: (await writesOf(approvalId)).map((w) => w.event_id) };
+        return { ok: true, eventIds: (await writesOf(approvalId)).flatMap((w) => (w.event_id ? [w.event_id] : [])) };
       }
       if (approval.status === 'failed') return { ok: false, reason: approval.error ?? DEFAULT_REASON };
       if (approval.status !== 'approved') return refuse(approval.agent_id, approvalId, `status_${approval.status}`);
@@ -100,12 +100,15 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
         const eventIds: string[] = [];
         for (const [n, ev] of events.entries()) {
           const idempotencyKey = `approval:${approval.id}:${n}`;
-          const { eventId } = await calendar.createEvent(agent.owner_id, ev, idempotencyKey);
+          // I7: the intent is recorded first, so an event the provider made but whose
+          // response was lost (or a crash before the id is stored) can still be undone by key.
           await db.query(
             `INSERT INTO calendar_writes (id, owner_id, approval_id, event_id, idempotency_key, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (idempotency_key) DO NOTHING`,
-            [randomUUID(), agent.owner_id, approval.id, eventId, idempotencyKey, clock.now()],
+             VALUES ($1, $2, $3, NULL, $4, $5) ON CONFLICT (idempotency_key) DO NOTHING`,
+            [randomUUID(), agent.owner_id, approval.id, idempotencyKey, clock.now()],
           );
+          const { eventId } = await calendar.createEvent(agent.owner_id, ev, idempotencyKey);
+          await db.query('UPDATE calendar_writes SET event_id = $2 WHERE idempotency_key = $1 AND event_id IS NULL', [idempotencyKey, eventId]);
           await actionLog.write({ agentId: agent.id, actor: 'system', action: 'calendar.event_created', detail: { approvalId, eventId, n } });
           eventIds.push(eventId);
         }
@@ -113,7 +116,13 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
       } catch (err) {
         log.warn({ approvalId, err: err instanceof Error ? err.message : String(err) }, 'calendar write failed');
         result = { ok: false, reason: ownerReason(err) };
-        await writer.undo(approvalId);
+        try {
+          await writer.undo(approvalId);
+        } catch (undoErr) {
+          // Left in calendar_writes (deleted_at NULL): a caller that must never leave a
+          // half-booking (a2a) sees it as still live and retries the undo.
+          log.warn({ approvalId, err: undoErr instanceof Error ? undoErr.message : String(undoErr) }, 'calendar undo after a failed write failed');
+        }
       }
       if (await approvals.finishExecution(approvalId, result.ok ? 'executed' : 'failed', result.ok ? null : result.reason)) {
         await actionLog.write({
@@ -132,9 +141,12 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
       let undone = 0;
       for (const w of await writesOf(approvalId)) {
         if (w.deleted_at) continue;
-        await calendar.deleteEvent(w.owner_id, w.event_id);
+        // An unconfirmed write (the provider's answer never arrived): find the event by key.
+        const eventId = w.event_id ?? (await calendar.eventIdForKey(w.owner_id, w.idempotency_key));
+        if (eventId) await calendar.deleteEvent(w.owner_id, eventId);
         await db.query('UPDATE calendar_writes SET deleted_at = $2 WHERE id = $1', [w.id, clock.now()]);
-        await actionLog.write({ agentId: approval?.agent_id ?? null, actor: 'system', action: 'calendar.event_deleted', detail: { approvalId, eventId: w.event_id } });
+        if (!eventId) continue; // never reached the calendar
+        await actionLog.write({ agentId: approval?.agent_id ?? null, actor: 'system', action: 'calendar.event_deleted', detail: { approvalId, eventId } });
         undone += 1;
       }
       return undone;

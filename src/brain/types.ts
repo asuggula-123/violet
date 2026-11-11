@@ -26,9 +26,19 @@ export interface BrainToolCtx {
 
 export type BrainTool<I = any> = ToolDef<BrainToolCtx, I>;
 
+/** A section of the Brain's dynamic prompt added by a later milestone. `tainted`: it holds third-party text (I11). */
+export interface BrainContext {
+  text: string;
+  tainted: boolean;
+}
+
+export type BrainContextProvider = (agent: AgentRow, owner: OwnerRow) => Promise<BrainContext | null>;
+
 export interface Brain {
   /** The Brain's tools. Later milestones add theirs: `app.brain.tools.register(def)`. */
   readonly tools: ToolRegistry<BrainToolCtx>;
+  /** Extra dynamic-prompt sections, in order (M4: agent conversations and open Envoy questions). */
+  readonly contextProviders: BrainContextProvider[];
   /** One owner turn (installed as router.hooks.onOwnerMessage). Idempotent per ctx.messageId. */
   handle(ctx: OwnerMessageCtx): Promise<void>;
 }

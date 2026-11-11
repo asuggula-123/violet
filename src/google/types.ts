@@ -28,6 +28,12 @@ export interface CalendarProvider {
   createEvent(ownerId: string, ev: NewCalendarEvent, idempotencyKey: string): Promise<{ eventId: string }>;
   /** Compensation only, CalendarWriter only. */
   deleteEvent(ownerId: string, eventId: string): Promise<void>;
+  /**
+   * The id of the event `createEvent` makes (or made) for this idempotency key, without a
+   * call that could create it: CalendarWriter uses it to undo a write whose response was lost.
+   * May return an id for an event that does not exist (deleteEvent treats that as gone).
+   */
+  eventIdForKey(ownerId: string, idempotencyKey: string): Promise<string | null>;
 }
 
 export interface EmailSummary {

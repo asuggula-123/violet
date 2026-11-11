@@ -4,13 +4,15 @@ import { sanitize } from '../core/sanitize.js';
 import { isLlmError } from '../llm/errors.js';
 import { runToolLoop, type ToolCall, type ToolLoopResult } from '../llm/toolLoop.js';
 import { ToolRegistry, type ToolDef } from '../llm/tools.js';
-import { loadOwnerThread, toTurns } from './history.js';
+import { historyTainted, loadOwnerThread, toTurns } from './history.js';
 import { canonicalJson, sha256, turnMemo } from './memo.js';
 import { dynamicPrompt, stablePrompt } from './prompt.js';
+import { foldReservedLineHeads } from './lineHeads.js';
+import { neutralizeReply } from './reply.js';
 import { calendarTools } from './tools/calendar.js';
 import { emailTools } from './tools/email.js';
 import { memoryTools } from './tools/memory.js';
-import type { Brain, BrainToolCtx, TurnState } from './types.js';
+import type { Brain, BrainContextProvider, BrainToolCtx, TurnState } from './types.js';
 
 export const BRAIN_MAX_STEPS = 10;
 export const BRAIN_MAX_TOKENS = 16_000;
@@ -39,8 +41,10 @@ export function createBrain(app: App): Brain {
   const { db, clock, llm, calendar, gmail, log } = app.deps;
   const { repos, actionLog, flags, gateway } = app;
   const memo = turnMemo(db, clock);
+  const approvalKinds = approvals;
 
   const tools = new ToolRegistry<BrainToolCtx>();
+  const contextProviders: BrainContextProvider[] = [];
   const pending = (agentId: string) => approvals.listPending(agentId);
   const deps = { db, clock, repos, calendar, gmail, approvals, flags, actionLog };
   for (const def of [...calendarTools(deps), ...emailTools(deps), ...memoryTools(deps)]) tools.register(def);
@@ -79,13 +83,26 @@ export function createBrain(app: App): Brain {
       return out;
     }
 
-    const history = toTurns(await loadOwnerThread(db, agent.id, messageId), ctx.msg.text);
+    // I11: third-party text in the context (tainted history rows, prompts quoting other
+    // agents, open Envoy questions) taints the turn before any tool runs.
+    const rows = await loadOwnerThread(db, agent.id, messageId);
+    const history = toTurns(rows, ctx.msg.text);
+    const waiting = await pending(agent.id);
+    const thirdParty = (a: { kind: string }) => approvalKinds.quotesThirdParty(a.kind);
+    const extra: string[] = [];
+    for (const provide of contextProviders) {
+      const section = await provide(agent, owner);
+      if (!section) continue;
+      extra.push(section.text);
+      if (section.tainted) turn.tainted = true;
+    }
+    if (historyTainted(rows) || waiting.some(thirdParty)) turn.tainted = true;
     let result: ToolLoopResult;
     try {
       result = await runToolLoop({
         llm,
         system: stablePrompt(agent, owner),
-        systemDynamic: dynamicPrompt(owner, clock.now(), await pending(agent.id)),
+        systemDynamic: dynamicPrompt(owner, clock.now(), waiting, thirdParty, extra),
         messages: history,
         tools,
         execute,
@@ -103,7 +120,7 @@ export function createBrain(app: App): Brain {
       return;
     }
 
-    const text = replyText(result);
+    const text = foldReservedLineHeads(neutralizeReply(replyText(result)));
     await logEntry('brain.turn', {
       outcome: 'answered',
       stopReason: result.stopReason,
@@ -113,9 +130,10 @@ export function createBrain(app: App): Brain {
       usage: result.usage,
       replied: text !== '',
     });
-    if (text) await gateway.sendToOwner(agent.id, text, { purpose: 'reply' });
+    // A reply written in a tainted turn may quote third parties: stored tainted (K1).
+    if (text) await gateway.sendToOwner(agent.id, text, { purpose: 'reply', ...(turn.tainted ? { meta: { tainted: true } } : {}) });
     await memo.finish(messageId, result.stopReason);
   }
 
-  return { tools, handle };
+  return { tools, contextProviders, handle };
 }

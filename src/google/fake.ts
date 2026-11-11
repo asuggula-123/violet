@@ -60,6 +60,10 @@ export class FakeCalendar implements CalendarProvider {
     return { eventId: event.id };
   }
 
+  async eventIdForKey(ownerId: string, idempotencyKey: string): Promise<string | null> {
+    return this.byKey.get(`${ownerId}:${idempotencyKey}`) ?? null;
+  }
+
   async deleteEvent(ownerId: string, eventId: string): Promise<void> {
     const list = this.list(ownerId);
     const i = list.findIndex((e) => e.id === eventId);

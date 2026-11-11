@@ -1,3 +1,4 @@
+import { a2aModule } from './a2a/module.js';
 import type { Module } from './app.js';
 import { approvalsModule } from './approvals/module.js';
 import { brainModule } from './brain/module.js';
@@ -12,4 +13,6 @@ export const defaultModules: readonly Module[] = [
   // M2: approvals first (the Brain's tools use them), then the Brain.
   approvalsModule,
   brainModule,
+  // M4: agent-to-agent conversations (after the Brain: it registers Brain tools).
+  a2aModule,
 ];

@@ -1,3 +1,4 @@
+import { quoteFolded } from '../brain/reply.js';
 import type { Clock } from '../clock.js';
 import type { Db } from '../db/db.js';
 import { TransportError, type InboundMessage } from '../transport/types.js';
@@ -8,7 +9,7 @@ import type { ControlChannel, OutboundGateway } from './outbound.js';
 import { pairingCodeMatches, parseStartCommand } from './pairing.js';
 import { inboundFromPayload } from './repos/inboundEvents.js';
 import { createRepos, type Repos } from './repos/index.js';
-import { quote, sanitize } from './sanitize.js';
+import { sanitize } from './sanitize.js';
 import type { AgentRow, InboundEventRow, OwnerRow } from './types.js';
 
 export const CANNED_REPLY_INTERVAL_MS = 12 * 3_600_000;
@@ -297,8 +298,10 @@ export function createRouter(deps: Deps): Router {
     const flagTaken = () =>
       steps.once('flag', async () => {
         // I13: the display name is stranger-authored too, so it is quoted like the text.
-        const who = quote(contact.display_name ?? contact.address, 80);
-        const what = msg.kind === 'unsupported' ? '(a non-text message)' : quote(msg.text, 200);
+        // Folded like agent text (K2): a stranger cannot put a live-looking `#ref` or the
+        // prompt tail into the digest, where 'Waiting for you' lines carry real refs.
+        const who = quoteFolded(contact.display_name ?? contact.address, 80);
+        const what = msg.kind === 'unsupported' ? '(a non-text message)' : quoteFolded(msg.text, 200);
         await flags.raise(agent.id, {
           kind: 'message_taken',
           urgency: 'digest',

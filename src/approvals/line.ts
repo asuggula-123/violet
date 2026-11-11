@@ -1,7 +1,7 @@
 import { sanitize } from '../core/sanitize.js';
 
 /** Number signs: `#` and the look-alikes `＃` `﹟` that NFKC folds to it. */
-const NUMBER_SIGNS = /[#＃﹟]/g;
+export const NUMBER_SIGNS = /[#＃﹟]/g;
 
 /**
  * I13: one code-rendered line built from stored data. Control characters and line breaks

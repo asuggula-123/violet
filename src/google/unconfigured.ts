@@ -31,6 +31,10 @@ export class UnconfiguredCalendar implements CalendarProvider {
   async deleteEvent(): Promise<never> {
     throw new GoogleNotConfiguredError('calendar.deleteEvent');
   }
+  /** Nothing is ever created here, so no key has an event: CalendarWriter's undo has nothing to delete. */
+  async eventIdForKey(): Promise<null> {
+    return null;
+  }
 }
 
 /** See UnconfiguredCalendar. No send method (I8). */

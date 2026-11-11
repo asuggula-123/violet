@@ -118,7 +118,7 @@ describe('production without Google: every caller is honest and quiet', () => {
       ['t1', true, NOT_CONFIGURED_REASON],
       ['t2', true, NOT_CONFIGURED_REASON],
       ['t3', true, NOT_CONFIGURED_REASON],
-      ['t4', true, "I couldn't open that email."], // read_email's own fixed text (src/brain/tools/email.ts)
+      ['t4', true, NOT_CONFIGURED_REASON], // m4fix: read_email passes the typed reason through too
       ['t5', true, NOT_CONFIGURED_REASON],
     ]);
     expect(w.textsTo(w.alex.address)).toEqual(['Google is not connected here.']);
@@ -148,7 +148,12 @@ describe('production without Google: every caller is honest and quiet', () => {
     expect(approval).toMatchObject({ status: 'failed', error: NOT_CONFIGURED_REASON });
     expect((await w.actions({ action: 'approval.failed' })).map((a) => a.detail.reason)).toEqual([NOT_CONFIGURED_REASON]);
     expect(await w.actions({ action: 'calendar.event_created' })).toEqual([]);
-    expect((await w.db.query('SELECT 1 FROM calendar_writes')).rowCount).toBe(0);
+    // I7 (M4): the write intent is recorded before the provider is called, then undone. Nothing is live:
+    // every row is undone, none carries an event id, and nothing was deleted from a calendar.
+    const writes = (await w.db.query<{ event_id: string | null; deleted_at: Date | null }>('SELECT event_id, deleted_at FROM calendar_writes')).rows;
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every((x) => x.event_id === null && x.deleted_at !== null)).toBe(true);
+    expect(await w.actions({ action: 'calendar.event_deleted' })).toEqual([]);
     expect((await w.app.repos.flags.listByAgent(w.alex.agent.id)).filter((f) => f.kind === 'booked')).toEqual([]);
 
     // Nothing retries: no job is left to run, a direct re-execution reports the same failure,

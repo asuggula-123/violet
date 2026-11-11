@@ -8,6 +8,6 @@ export type { ApprovalService } from '../approvals/types.js';
 
 export type { Brain } from '../brain/types.js';
 
-export interface A2AService {}
+export type { A2AService } from '../a2a/types.js';
 
 export type { DigestService } from '../flags/types.js';

@@ -3,7 +3,7 @@ import type { App } from '../app.js';
 import { sanitize } from '../core/sanitize.js';
 import { pgErrorCode } from '../db/db.js';
 import { createCalendarWriter } from './calendarWriter.js';
-import { codeLine } from './line.js';
+import { codeLine, NUMBER_SIGNS } from './line.js';
 import { approvalsRepo, PROMPT_TAIL, promptSummary } from './repo.js';
 import type { ApprovalKind, ApprovalRow, ApprovalService, KindContext } from './types.js';
 
@@ -24,6 +24,16 @@ export interface ApprovalServiceImpl extends ApprovalService {
  */
 export function composePrompt(ref: number, rendered: string): string {
   return `#${ref} ${codeLine(rendered, PROMPT_BODY_MAX)}${PROMPT_TAIL}`;
+}
+
+/**
+ * Whether composePrompt would show `rendered` whole (no cut at PROMPT_BODY_MAX). Kinds whose
+ * yes acts on more than the prompt could show (M4 multi-event outcomes) check this first.
+ */
+export function promptFits(rendered: string): boolean {
+  const raw = sanitize(rendered, Number.MAX_SAFE_INTEGER);
+  const folded = sanitize(raw.normalize('NFKC').replace(NUMBER_SIGNS, ''), Number.MAX_SAFE_INTEGER);
+  return Array.from(raw).length <= PROMPT_BODY_MAX && Array.from(folded).length <= PROMPT_BODY_MAX;
 }
 
 export function approvalButtons(id: string) {
@@ -58,7 +68,11 @@ export function createApprovalService(app: App): ApprovalServiceImpl {
     if (a.status !== 'pending' || a.prompt_transport_message_id !== null) return a;
     if (!(await repo.claimSend(a.id, SEND_LEASE_MS))) return (await repo.get(a.id)) ?? a;
     try {
-      const sent = await gateway.sendToOwner(a.agent_id, a.prompt, { purpose: 'approval', buttons: approvalButtons(a.id) });
+      const sent = await gateway.sendToOwner(a.agent_id, a.prompt, {
+        purpose: 'approval',
+        buttons: approvalButtons(a.id),
+        ...(service.quotesThirdParty(a.kind) ? { meta: { tainted: true } } : {}),
+      });
       if (!sent) {
         await repo.releaseSend(a.id); // paused: sent on resume
         return a;
@@ -83,6 +97,7 @@ export function createApprovalService(app: App): ApprovalServiceImpl {
   const service: ApprovalServiceImpl = {
     calendar,
     kind: (name) => kinds.get(name),
+    quotesThirdParty: (name) => kinds.get(name)?.quotesThirdParty === true,
 
     async kindContext(approval) {
       const { agent, owner } = await ownerOf(approval.agent_id);

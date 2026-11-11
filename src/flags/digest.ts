@@ -31,6 +31,8 @@ const DEFAULT_KINDS: Record<string, string> = {
   message_taken: 'messages',
   a2a_opened: 'conversations',
   a2a_closed: 'conversations',
+  // A conversation whose Envoy made no move and needs the owner's guidance (M4).
+  a2a_stalled: 'conversations',
   draft_created: 'drafts',
   booked: 'booked',
   a2a_booked: 'booked',

@@ -52,6 +52,11 @@ export interface ApprovalKind<P = any> {
   latestExpiry?(payload: P): Date;
   /** Runs inside CalendarWriter before any write. Throw (ideally with `ownerMessage`) to refuse. */
   guard?(approval: ApprovalRow): Promise<void>;
+  /**
+   * The prompt quotes third-party text (e.g. another agent's proposal, M4). The stored
+   * prompt message is marked tainted and the Brain sees it only as untrusted data.
+   */
+  quotesThirdParty?: boolean;
 }
 
 export interface ApprovalRequest {
@@ -86,5 +91,7 @@ export interface ApprovalService {
   sendUnsent(agentId: string): Promise<void>;
   /** pending past expires_at → expired (+ onExpired, + a digest flag). Returns how many. */
   expireDue(agentId: string): Promise<number>;
+  /** Whether prompts of this kind quote third-party text (ApprovalKind.quotesThirdParty). */
+  quotesThirdParty(kind: string): boolean;
   readonly calendar: CalendarWriter;
 }

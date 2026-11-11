@@ -54,8 +54,9 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
   const { db, clock } = app.deps;
   const repo = approvalsRepo(db, clock);
 
-  async function reply(ctx: OwnerMessageCtx, text: string): Promise<true> {
-    await app.gateway.sendToOwner(ctx.agent.id, text, { purpose: 'reply' });
+  /** `tainted`: the text quotes third parties (a kind with quotesThirdParty): stored tainted (8.2 history hygiene). */
+  async function reply(ctx: OwnerMessageCtx, text: string, tainted = false): Promise<true> {
+    await app.gateway.sendToOwner(ctx.agent.id, text, { purpose: 'reply', ...(tainted ? { meta: { tainted: true } } : {}) });
     return true;
   }
 
@@ -65,7 +66,7 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
     const kctx = await service.kindContext(a);
     const approved = a.status !== 'denied';
     const text = approved ? await kind?.onApproved?.(kctx) : await kind?.onDenied?.(kctx);
-    return reply(ctx, text || (approved ? RESOLVER_TEXT.approvedDefault(a.ref) : RESOLVER_TEXT.deniedDefault(a.ref)));
+    return reply(ctx, text || (approved ? RESOLVER_TEXT.approvedDefault(a.ref) : RESOLVER_TEXT.deniedDefault(a.ref)), service.quotesThirdParty(a.kind));
   }
 
   async function resolve(ctx: OwnerMessageCtx, target: ApprovalRow, decision: Decision): Promise<true> {
@@ -149,6 +150,7 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
       action: 'approval.ambiguous',
       detail: { pending: pending.length, messageId: ctx.messageId, ...(replyTo ? { reason: 'reply_to_non_prompt' } : {}) },
     });
-    return reply(ctx, whichOne(pending));
+    // The list quotes every pending prompt: tainted when any of them quotes third parties (K1).
+    return reply(ctx, whichOne(pending), pending.some((a) => service.quotesThirdParty(a.kind)));
   };
 }

@@ -129,6 +129,11 @@ export class GoogleCalendar implements CalendarProvider {
     }
   }
 
+  /** Client-supplied ids are derived from the key, so no request is needed. */
+  async eventIdForKey(_ownerId: string, idempotencyKey: string): Promise<string | null> {
+    return eventIdFor(idempotencyKey);
+  }
+
   async deleteEvent(ownerId: string, eventId: string): Promise<void> {
     try {
       await this.api.call(ownerId, 'calendarWrite', { method: 'DELETE', url: url(`${EVENTS}/${encodeURIComponent(eventId)}`, { sendUpdates: 'none' }) });

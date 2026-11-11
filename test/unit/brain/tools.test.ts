@@ -26,9 +26,16 @@ describe('Brain tools', () => {
 
   const fri = (h: number, m = 0) => `2026-11-13T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00-05:00`;
 
-  it('the tool set is exactly the M2 list: nothing that sends, books, approves, pauses or messages others', () => {
+  it('the tool set is exactly the M2 list plus the M4 a2a tools: nothing that sends, books, approves, pauses or messages others', () => {
     expect(w.app.brain!.tools.names().sort()).toEqual(
       [
+        // M4 (section 8.2 "Added by M4"): releases go through I11, the transcript is code-rendered.
+        'talk_to_agent',
+        'tell_envoy',
+        'list_agent_conversations',
+        'read_agent_conversation',
+        'send_transcript_to_owner',
+        'end_agent_conversation',
         'draft_email',
         'find_free_time',
         'get_schedule',

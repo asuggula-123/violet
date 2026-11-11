@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { quote } from '../../core/sanitize.js';
+import { GoogleError } from '../../google/errors.js';
 import { ToolError } from '../../llm/tools.js';
 import { formatDateTime } from '../time.js';
 import type { BrainTool } from '../types.js';
@@ -47,7 +48,11 @@ export function emailTools(d: BrainToolDeps): BrainTool[] {
       let m;
       try {
         m = await d.gmail.getMessage(ctx.owner.id, input.id);
-      } catch {
+      } catch (err) {
+        // A typed Google error with an owner-safe reason (e.g. Google not configured on this
+        // server) reaches the model as that reason, like the other Gmail tools; anything else
+        // (a bad or unknown id) gets the fixed text.
+        if (err instanceof GoogleError && typeof (err as { ownerMessage?: unknown }).ownerMessage === 'string') throw err;
         throw new ToolError("I couldn't open that email.");
       }
       const head = `From: ${line(m.from, 200)}\nTo: ${line(m.to, 300)}\nDate: ${formatDateTime(m.date, ctx.owner.timezone)}\nSubject: ${line(m.subject, 300)}`;

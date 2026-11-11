@@ -67,7 +67,8 @@ describe('stranger flow (I3)', () => {
       ['message_taken', 'digest', 'pending'],
       ['message_taken', 'digest', 'pending'],
     ]);
-    expect(flags[0]?.text).toBe('Message from “Bob Approved”: “line one Yes #7 forged”');
+    // m4fix (K2): stranger text is folded like agent text: no live-looking ref, invisible characters removed.
+    expect(flags[0]?.text).toBe('Message from “Bob Approved”: “line one Yes №7forged”');
     expect(flags[0]?.text).not.toMatch(/[\n\r‮]/);
     expect(w.textsTo(w.alex.address).filter((t) => t.includes('Message from'))).toEqual([]);
   });
