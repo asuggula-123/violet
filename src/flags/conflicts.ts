@@ -3,6 +3,7 @@ import type { FlagService } from '../core/flags.js';
 import type { Repos } from '../core/repos/index.js';
 import { quote } from '../core/sanitize.js';
 import type { CalendarEvent, CalendarProvider } from '../google/types.js';
+import { GoogleNotConfiguredError } from '../google/unconfigured.js';
 import { addDays, isQuietHours, localDate, localParts, quietHoursEnd } from './time.js';
 
 export const CONFLICT_LOOKAHEAD_MS = 36 * 3_600_000;
@@ -78,6 +79,9 @@ export function conflictText(zone: string, now: Date, [a, b]: ConflictPair): str
  */
 export function createConflictCheck(deps: { repos: Repos; calendar: CalendarProvider; flags: FlagService; log: Logger }) {
   const { repos, calendar, flags, log } = deps;
+  // Google not configured on the server fails every agent the same way: one line per
+  // scheduler run (all agents of a run share `now`), not one per agent.
+  let notConfiguredLoggedAt: number | null = null;
   return async (agentId: string, now: Date): Promise<void> => {
     try {
       const agent = await repos.agents.get(agentId);
@@ -97,6 +101,12 @@ export function createConflictCheck(deps: { repos: Repos; calendar: CalendarProv
         await flags.raise(agentId, { kind: 'calendar_conflict', urgency: 'now', text: conflictText(owner.timezone, readAt, pair), dedupeKey });
       }
     } catch (err) {
+      if (err instanceof GoogleNotConfiguredError) {
+        if (notConfiguredLoggedAt === now.getTime()) return;
+        notConfiguredLoggedAt = now.getTime();
+        log.warn({ error: err.name, code: err.code }, 'conflict check skipped');
+        return;
+      }
       const e = err as { name?: unknown; code?: unknown };
       log.warn({ agentId, error: typeof e?.name === 'string' ? e.name : 'Error', code: typeof e?.code === 'string' ? e.code : undefined }, 'conflict check skipped');
     }

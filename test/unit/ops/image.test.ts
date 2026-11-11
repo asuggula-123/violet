@@ -49,6 +49,7 @@ describe('build output for operators', () => {
     ['migrate:prod', 'migrate'],
     ['owner:add:prod', 'ownerAdd'],
     ['google:link:prod', 'googleLink'],
+    ['pairing:reissue:prod', 'pairingReissue'],
   ])('%s runs the compiled CLI with node (no dev dependency)', (script, cli) => {
     expect(scripts[script]).toBe(`node dist/cli/${cli}.js`);
     expect(read(`src/cli/${cli}.ts`).length).toBeGreaterThan(0);

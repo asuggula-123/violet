@@ -2,11 +2,12 @@ import { parseArgs } from 'node:util';
 import { SystemClock } from '../clock.js';
 import { parseConfig } from '../config.js';
 import { createActionLog } from '../core/actionLog.js';
+import { pairingCodeLines } from '../core/pairingText.js';
 import { createRepos } from '../core/repos/index.js';
 import { createHousehold, createOwnerWithAgent, type SetupCtx } from '../core/setup.js';
 import { migrate } from '../db/migrate.js';
 import { openDb } from '../db/open.js';
-import { checkTelegramCliArgs, telegramPairingInstructions } from '../transport/telegram/pairing.js';
+import { checkTelegramCliArgs } from '../transport/telegram/pairing.js';
 import type { TransportName } from '../transport/types.js';
 
 // With embedded PGlite (no DATABASE_URL), stop the server first: one process per data dir.
@@ -68,9 +69,7 @@ try {
   console.log(`Owner:     ${created.owner.name} (${created.owner.id})`);
   console.log(`Agent:     ${created.agent.id} at ${created.agent.agent_address}`);
   if (created.pairingCode) {
-    console.log(`\nPairing code (shown once, expires ${created.agent.pairing_expires_at?.toISOString()}):`);
-    console.log(`  /start ${created.pairingCode}`);
-    if (transport === 'telegram') console.log(`\n${telegramPairingInstructions(created.pairingCode, telegramArgs.botUsername).join('\n')}`);
+    console.log(`\n${pairingCodeLines(created.pairingCode, created.agent.pairing_expires_at, created.agent.transport, telegramArgs.botUsername).join('\n')}`);
   } else {
     console.log('Owner address preset; no pairing needed.');
   }

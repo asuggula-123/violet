@@ -40,7 +40,7 @@ describe('docs/DEPLOY.md matches the code', () => {
   });
 
   it('mentions only CLI flags the CLIs parse (besides flyctl/docker flags)', () => {
-    const cliSource = ['ownerAdd', 'googleLink', 'migrate'].map((c) => read(`src/cli/${c}.ts`)).join('\n');
+    const cliSource = ['ownerAdd', 'googleLink', 'migrate', 'pairingReissue'].map((c) => read(`src/cli/${c}.ts`)).join('\n');
     const tooling = new Set(['app', 'ha', 'image', 'profile', 'build', 'help']);
     const flags = new Set([...doc.matchAll(/(?<![\w-])--([a-z][a-z-]*)/g)].map((m) => m[1]!));
     expect(flags).toContain('agent-address');

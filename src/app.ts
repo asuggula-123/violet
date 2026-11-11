@@ -94,7 +94,9 @@ export async function buildApp(deps: AppDeps, modules: readonly Module[], opts: 
         const txRepos = createRepos(tx, clock);
         const inserted = await txRepos.inboundEvents.insert(msg);
         if (!inserted) return null;
-        const agent = await txRepos.agents.findByAddress(msg.transport, msg.agentAddress);
+        const found = await txRepos.agents.findByAddress(msg.transport, msg.agentAddress);
+        // Locked before the owner check, so a concurrent pairing --reset is ordered with it.
+        const agent = found ? await txRepos.agents.getForUpdate(found.id) : null;
         // Pause is immediate (I14): the owner's pause/resume flips state here, in the
         // transaction that stores the event, never behind the lane's backlog. The gateway
         // checks `paused` at send time, so older jobs and their retries cannot send after

@@ -245,6 +245,14 @@ export function createRouter(deps: Deps): Router {
     if (!owner) throw new Error(`agent ${agent.id} has no owner row`);
     const ctx: OwnerMessageCtx = { agent, owner, msg, messageId };
     await steps.once('owner.handled', async () => {
+      // The 'route' decision is recorded once. A pairing --reset that committed since
+      // (between steps, or before a retry of this job) means the sender is no longer the
+      // owner: the Brain must not act on the old chat's text (I1).
+      const fresh = await repos.agents.get(agent.id);
+      if (!fresh || !isOwner(fresh, msg)) {
+        await actionLog.write({ agentId: agent.id, actor: 'system', action: 'inbound.dropped', detail: { reason: 'owner_reset', eventId, messageId } });
+        return true;
+      }
       for (const intercept of hooks.ownerInterceptors) {
         if (await intercept(ctx)) return true;
       }
@@ -342,8 +350,13 @@ export function createRouter(deps: Deps): Router {
     const held =
       agent.paused || event.progress?.[PAUSED_AT_ARRIVAL_STEP] === true || event.progress?.held !== undefined;
     const decision = await steps.atomic('route', async (s): Promise<'paired' | 'owner' | 'stranger'> => {
-      if (await tryPairing(s, agent, msg, event.id)) return 'paired';
-      return isOwner(agent, msg) ? 'owner' : 'stranger';
+      // `agent` was read before this transaction. Pairing and owner identity are decided
+      // from the row locked here, so a pairing re-issue or --reset (which takes the same
+      // lock) that committed in between is always seen: an old code never binds, and an
+      // unpaired chat is a stranger from its next message (I1).
+      const locked = (await s.repos.agents.getForUpdate(agent.id)) ?? agent;
+      if (await tryPairing(s, locked, msg, event.id)) return 'paired';
+      return isOwner(locked, msg) ? 'owner' : 'stranger';
     });
     if (decision === 'paired') {
       await steps.once('pairing.ack', async () => {

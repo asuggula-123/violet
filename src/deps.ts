@@ -3,8 +3,7 @@ import { SystemClock, type Clock } from './clock.js';
 import type { AppDeps } from './app.js';
 import type { Config } from './config.js';
 import type { Db } from './db/db.js';
-import { FakeCalendar, FakeGmail } from './google/fake.js';
-import { createGoogle, googleConfigured } from './google/services.js';
+import { createGoogleProviders } from './google/providers.js';
 import { AnthropicLlm } from './llm/anthropic.js';
 import { UnconfiguredLlm } from './llm/errors.js';
 import type { LlmClient } from './llm/types.js';
@@ -32,20 +31,18 @@ function createTransport(config: Config, clock: Clock): Transport {
 
 /**
  * Production wiring of providers: the Claude API when ANTHROPIC_API_KEY is set, the real
- * Google providers once Google is configured (else in-memory doubles), and the
- * transport chosen by TRANSPORT.
+ * Google providers once Google is configured (else, in production, providers that fail
+ * every call, and in-memory doubles elsewhere), and the transport chosen by TRANSPORT.
  */
 export function createDeps(config: Config, db: Db): AppDeps {
   const clock = new SystemClock();
   const log = createLogger(config);
-  const google = googleConfigured(config) ? createGoogle({ config, db, clock, log }) : null;
   return {
     db,
     clock,
     transport: createTransport(config, clock),
     llm: createLlm(config),
-    calendar: google?.calendar ?? new FakeCalendar(),
-    gmail: google?.gmail ?? new FakeGmail(),
+    ...createGoogleProviders({ config, db, clock, log }),
     config,
     log,
   };

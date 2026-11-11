@@ -38,5 +38,12 @@ export function contactsRepo(db: Queryable, clock: Clock) {
     async markCannedReply(id: string): Promise<void> {
       await db.query('UPDATE contacts SET last_canned_reply_at = $2 WHERE id = $1', [id, clock.now()]);
     },
+    /** An unpaired owner's contact row becomes a stranger's (pairing re-issue with --reset). */
+    async demoteOwner(agentId: string, transport: TransportName, address: string): Promise<void> {
+      await db.query(
+        `UPDATE contacts SET kind = 'stranger' WHERE agent_id = $1 AND transport = $2 AND address = $3 AND kind = 'owner'`,
+        [agentId, transport, address],
+      );
+    },
   };
 }

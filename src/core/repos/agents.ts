@@ -75,5 +75,22 @@ export function agentsRepo(db: Queryable, clock: Clock) {
     async setPaused(id: string, paused: boolean): Promise<void> {
       await db.query('UPDATE agents SET paused = $2, paused_at = $3 WHERE id = $1', [id, paused, paused ? clock.now() : null]);
     },
+    /** Locks the agent row for the rest of the transaction (pairing re-issue, routing, ingest). */
+    async getForUpdate(id: string): Promise<AgentRow | null> {
+      const res = await db.query<AgentRow>('SELECT * FROM agents WHERE id = $1 FOR UPDATE', [id]);
+      return res.rows[0] ?? null;
+    },
+    /** Replaces the pairing code of an unpaired agent (the old one stops matching). Returns false if paired. */
+    async setPairingCode(id: string, codeHash: string, expiresAt: Date): Promise<boolean> {
+      const res = await db.query(
+        'UPDATE agents SET pairing_code_hash = $2, pairing_expires_at = $3 WHERE id = $1 AND owner_address IS NULL',
+        [id, codeHash, expiresAt],
+      );
+      return res.rowCount === 1;
+    },
+    /** Forgets the owner's address: from now on that chat is a stranger (I1). */
+    async unbindOwner(id: string): Promise<void> {
+      await db.query('UPDATE agents SET owner_address = NULL WHERE id = $1', [id]);
+    },
   };
 }

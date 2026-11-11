@@ -56,10 +56,15 @@ Never paste tokens into files, chats or tickets. They go only into `fly secrets 
 
 ## 4. Google OAuth client (optional: calendar and Gmail)
 
-**[account]** Skip this to run without Google. Violet then reads no Google data: it uses
-in-memory stand-ins, so the calendar and inbox look empty, and an event the owner approves
-is "booked" only into that stand-in (lost at the next restart), never into a real
-calendar. In Google Cloud Console, in a project of your own:
+**[account]** Skip this to run without Google. In production (`NODE_ENV=production`)
+Violet then has no calendar or Gmail at all, and says so: the boot log warns
+`Google is not configured`, every calendar or email request the owner makes fails and
+the assistant is told "Google isn't connected on this server" (it tells the owner in its
+own words), and an event the owner approves is not booked — the
+owner gets `I couldn't book #<n>: Google isn't connected on this server.` and the
+approval ends `failed`. Nothing is stored in a stand-in. (Outside production — local
+runs and tests — in-memory stand-ins are used instead, and the log says so at start-up.)
+In Google Cloud Console, in a project of your own:
 
 1. Enable the **Google Calendar API** and the **Gmail API**.
 2. OAuth consent screen: user type External (or Internal on Workspace); add the scopes
@@ -155,8 +160,24 @@ owner id and a pairing code (shown once, valid 24 hours). A call prints
 **[real people]** Each owner opens their own bot in Telegram (or the printed
 `https://t.me/<bot username>?start=<code>` link) and sends exactly `/start <code>`. The
 first matching message binds that Telegram account as the owner; anyone else who writes
-to the bot gets a fixed canned reply. A lost or expired code: run `owner:add` again only
-for a new owner; there is no re-issue command yet.
+to the bot gets a fixed canned reply. Run `owner:add` again only for a new owner.
+
+A lost or expired code: issue a fresh one for that agent (the agent id is the `Agent:`
+line `owner:add` printed). The old code stops working at once; the new one is printed
+once, with the same instructions, and valid 24 hours:
+
+```sh
+cd /app && npm run pairing:reissue:prod -- --agent <agent id> --bot-username <bot username>
+```
+
+It refuses an agent that is already paired. To move an agent to another Telegram account
+(for example the owner's new phone number), add `--reset`: the paired chat stops being the
+owner at once (its next message gets the stranger reply) and a new code is issued. A message
+from the old chat that was already being handled when the reset ran gets no reply, and one
+not yet handed to the assistant is dropped (`inbound.dropped`, reason `owner_reset`). The
+agent keeps its history and pending approvals, so pair only the same owner again.
+`action_log` records `pairing.reset` and `pairing.code_issued` (never the code). Locally:
+`npm run pairing:reissue -- --agent <agent id>`.
 
 ## 9. Connect Google (optional)
 
@@ -227,6 +248,7 @@ No accounts, keys or money involved.
   `docker compose exec app npm run owner:add:prod -- <flags as above>`. The dev endpoints
   use `ADMIN_TOKEN`, default `local-dev-admin-token-not-a-secret`.
 - **The production build without Docker:** `npm run build`, then `npm start`; the CLIs
-  run as `npm run migrate:prod`, `npm run owner:add:prod`, `npm run google:link:prod`.
+  run as `npm run migrate:prod`, `npm run owner:add:prod`, `npm run google:link:prod`,
+  `npm run pairing:reissue:prod`.
 - **Tests:** `npm test` (PGlite); `TEST_DATABASE_URL=postgres://violet:violet@127.0.0.1:5432/violet_test npm run test:pg`
   against a real Postgres.
