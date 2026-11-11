@@ -46,6 +46,8 @@ export const calendarEventKind: ApprovalKind<CalendarEventPayload> = {
     return `Okay, I won't book #${approval.ref}.`;
   },
 
+  booked: (p, { timezone }) => `${title(p)} — ${when(p, timezone)}`,
+
   // Once the event has started, a yes is too late: the approval expires at the start.
   latestExpiry: (p) => new Date(p.start),
 

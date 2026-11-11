@@ -43,7 +43,9 @@ describe('scopes → capabilities', () => {
 describe('TokenStore', () => {
   let gw: GoogleWorld;
   beforeEach(async () => {
-    gw = await createGoogleWorld();
+    // 10:00 in the owners' zone (America/New_York): the reconnect flag is texted at once.
+    // At night the I17 policy holds it until 07:00 (see 'reconnect flag in quiet hours' below).
+    gw = await createGoogleWorld({}, { start: '2026-11-09T15:00:00Z' });
   });
   afterEach(async () => gw.close());
 
@@ -226,5 +228,29 @@ describe('TokenStore', () => {
     await expect(profile()).rejects.toBeInstanceOf(GoogleRateLimitedError);
     gw.stub.expect({ method: 'GET', url: (u) => u.pathname.endsWith('/messages'), respond: () => Promise.reject(new Error('ECONNRESET')) });
     await expect(profile()).rejects.toBeInstanceOf(GoogleTransientError);
+  });
+});
+
+describe('reconnect flag in quiet hours (I17)', () => {
+  let gw: GoogleWorld;
+  beforeEach(async () => {
+    // 04:00 in America/New_York.
+    gw = await createGoogleWorld({}, { start: '2026-11-09T09:00:00Z' });
+  });
+  afterEach(async () => gw.close());
+
+  it('is held, not texted, and goes out once at 07:00 owner time', async () => {
+    const owner = gw.w.alex.owner.id;
+    await gw.connect(owner);
+    gw.stub.expect({ method: 'POST', url: TOKEN_URL, respond: { status: 400, json: { error: 'invalid_grant' } } });
+    await expect(gw.g.tokens.accessToken(owner)).rejects.toBeInstanceOf(GoogleAuthError);
+    expect(gw.w.textsTo(gw.w.alex.address)).toEqual([]);
+    expect(await gw.w.actions({ action: 'flag.held' })).toHaveLength(1);
+    await gw.w.advance({ hours: 2, minutes: 59 });
+    expect(gw.w.textsTo(gw.w.alex.address)).toEqual([]);
+    await gw.w.advance({ minutes: 1 });
+    expect(gw.w.textsTo(gw.w.alex.address)).toEqual([REVOKED_FLAG_TEXT]);
+    await gw.w.advance({ hours: 1 });
+    expect(gw.w.textsTo(gw.w.alex.address)).toEqual([REVOKED_FLAG_TEXT]);
   });
 });

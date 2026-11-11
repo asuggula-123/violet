@@ -72,6 +72,8 @@ describe('action log coverage of flow 8.1 (I15)', () => {
       'inbound.held',
       'inbound.received',
       'inbound.held',
+      // 8.6: a stranger's message taken while paused still reaches the next digest.
+      'flag.raised',
       'outbound.suppressed',
     ]);
     const m3 = await mark();

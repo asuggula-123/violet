@@ -2,7 +2,7 @@ import type { ActionLog } from './actionLog.js';
 import type { OutboundGateway } from './outbound.js';
 import type { Repos } from './repos/index.js';
 import { sanitize } from './sanitize.js';
-import type { FlagUrgency } from './types.js';
+import type { FlagRow, FlagUrgency } from './types.js';
 
 export interface FlagInput {
   kind: string;
@@ -15,17 +15,34 @@ export interface FlagService {
   raise(agentId: string, f: FlagInput): Promise<void>;
 }
 
+/** How a pending 'now' flag is delivered. M5 (src/flags/policy.ts) installs the I17 policy. */
+export type NowDelivery = (flag: FlagRow) => Promise<void>;
+
+/** The app's FlagService plus the hook a module uses to replace 'now' delivery. */
+export interface FlagHub extends FlagService {
+  setNowDelivery(deliver: NowDelivery): void;
+}
+
 export const FLAG_MAX_LENGTH = 500;
 
 /**
  * Basic flags (M1): 'now' goes to the owner at once, 'digest' is stored pending.
  * Raising with a dedupeKey already used for this agent adds nothing; if that flag is a
  * 'now' flag still pending (its send failed), the raise retries the delivery.
- * M5 adds the urgent budget and quiet hours (I17).
+ * The same object keeps working after flagsModule swaps the 'now' delivery for the
+ * I17 policy (budget, quiet hours, pause), so callers that captured it need no re-wiring.
  */
-export function createFlagService(deps: { repos: Repos; gateway: OutboundGateway; actionLog: ActionLog }): FlagService {
+export function createFlagService(deps: { repos: Repos; gateway: OutboundGateway; actionLog: ActionLog }): FlagHub {
   const { repos, gateway, actionLog } = deps;
+  const sendAtOnce: NowDelivery = async (flag) => {
+    const sent = await gateway.sendToOwner(flag.agent_id, flag.text, { purpose: 'flag' });
+    await repos.flags.setStatus(flag.id, sent ? 'sent' : 'suppressed');
+  };
+  let deliverNow = sendAtOnce;
   return {
+    setNowDelivery(deliver) {
+      deliverNow = deliver;
+    },
     async raise(agentId, f) {
       const text = sanitize(f.text, FLAG_MAX_LENGTH);
       let flag = await repos.flags.insert({ agentId, kind: f.kind, urgency: f.urgency, text, ...(f.dedupeKey ? { dedupeKey: f.dedupeKey } : {}) });
@@ -43,8 +60,7 @@ export function createFlagService(deps: { repos: Repos; gateway: OutboundGateway
         if (!flag || flag.status !== 'pending') return;
       }
       if (flag.urgency !== 'now') return;
-      const sent = await gateway.sendToOwner(agentId, flag.text, { purpose: 'flag' });
-      await repos.flags.setStatus(flag.id, sent ? 'sent' : 'suppressed');
+      await deliverNow(flag);
     },
   };
 }

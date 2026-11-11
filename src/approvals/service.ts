@@ -3,6 +3,7 @@ import type { App } from '../app.js';
 import { sanitize } from '../core/sanitize.js';
 import { pgErrorCode } from '../db/db.js';
 import { createCalendarWriter } from './calendarWriter.js';
+import { codeLine } from './line.js';
 import { approvalsRepo, PROMPT_TAIL, promptSummary } from './repo.js';
 import type { ApprovalKind, ApprovalRow, ApprovalService, KindContext } from './types.js';
 
@@ -18,15 +19,11 @@ export interface ApprovalServiceImpl extends ApprovalService {
 }
 
 /**
- * I13: the prompt is code-rendered from the stored payload and forced to ONE line:
- * control characters and line breaks are stripped, the length is capped, and the rendered
- * part is NFKC-normalized before every number sign is removed (`#`, and the look-alikes
- * `＃` `﹟` that fold to it), so the leading `#<ref>` is the only reference in it.
+ * I13: the prompt is code-rendered from the stored payload and forced to ONE line with no
+ * number sign in the rendered part (codeLine), so the leading `#<ref>` is the only reference in it.
  */
-const NUMBER_SIGNS = /[#\uFF03\uFE5F]/g;
 export function composePrompt(ref: number, rendered: string): string {
-  const body = sanitize(sanitize(rendered, PROMPT_BODY_MAX).normalize('NFKC').replace(NUMBER_SIGNS, ''), PROMPT_BODY_MAX);
-  return `#${ref} ${body}${PROMPT_TAIL}`;
+  return `#${ref} ${codeLine(rendered, PROMPT_BODY_MAX)}${PROMPT_TAIL}`;
 }
 
 export function approvalButtons(id: string) {
@@ -41,7 +38,7 @@ export function createApprovalService(app: App): ApprovalServiceImpl {
   const { repos, actionLog, gateway, flags } = app;
   const kinds = new Map<string, ApprovalKind>();
   const repo = approvalsRepo(db, clock);
-  const calendar = createCalendarWriter({ db, clock, repos, calendar: provider, actionLog, log, kind: (n) => kinds.get(n) });
+  const calendar = createCalendarWriter({ db, clock, repos, calendar: provider, actionLog, flags, log, kind: (n) => kinds.get(n) });
 
   async function ownerOf(agentId: string) {
     const agent = await repos.agents.get(agentId);

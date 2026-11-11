@@ -10,4 +10,4 @@ export type { Brain } from '../brain/types.js';
 
 export interface A2AService {}
 
-export interface DigestService {}
+export type { DigestService } from '../flags/types.js';

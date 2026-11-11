@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { Logger } from 'pino';
 import type { Clock } from '../clock.js';
 import type { ActionLog } from '../core/actionLog.js';
+import type { FlagService } from '../core/flags.js';
 import type { Repos } from '../core/repos/index.js';
 import type { Queryable } from '../db/db.js';
 import type { CalendarProvider } from '../google/types.js';
+import { codeLine } from './line.js';
 import { approvalsRepo } from './repo.js';
-import type { ApprovalKind, CalendarWriter, ExecuteResult } from './types.js';
+import type { ApprovalKind, ApprovalRow, CalendarWriter, ExecuteResult } from './types.js';
 
 /** Thrown when CalendarWriter is asked to write for an approval that is not `approved` (I6). */
 export class CalendarWriteRefused extends Error {
@@ -18,6 +20,8 @@ class PastEvent extends Error {
 }
 
 const DEFAULT_REASON = "the calendar didn't accept it";
+/** Cap for a digest 'Booked' line. */
+export const BOOKED_LINE_MAX = 240;
 
 interface Deps {
   db: Queryable;
@@ -25,6 +29,7 @@ interface Deps {
   repos: Repos;
   calendar: CalendarProvider;
   actionLog: ActionLog;
+  flags: FlagService;
   log: Logger;
   kind(name: string): ApprovalKind | undefined;
 }
@@ -35,7 +40,7 @@ interface Deps {
  * payload via the kind's calendarEvents(): no caller can pass event data in.
  */
 export function createCalendarWriter(deps: Deps): CalendarWriter {
-  const { db, clock, repos, calendar, actionLog, log } = deps;
+  const { db, clock, repos, calendar, actionLog, flags, log } = deps;
   const approvals = approvalsRepo(db, clock);
 
   async function writesOf(approvalId: string) {
@@ -51,11 +56,27 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
     throw new CalendarWriteRefused(`calendar write refused for approval ${approvalId}: ${reason}`);
   }
 
+  /**
+   * 8.5: a booked approval of a kind with `booked()` becomes one 'booked' digest item,
+   * code-rendered from the stored payload (I13). The dedupe key makes it once per approval,
+   * so it is raised again (a no-op) on every call that finds the approval executed: a
+   * failure between the booking and the flag is repaired by the retry.
+   */
+  async function flagBooked(approval: ApprovalRow, kind: ApprovalKind | undefined): Promise<void> {
+    if (!kind?.booked) return;
+    const agent = await repos.agents.get(approval.agent_id);
+    const owner = agent ? await repos.owners.get(agent.owner_id) : null;
+    if (!agent || !owner) return;
+    const line = codeLine(kind.booked(kind.schema.parse(approval.payload), { timezone: owner.timezone }), BOOKED_LINE_MAX);
+    await flags.raise(agent.id, { kind: 'booked', urgency: 'digest', text: line, dedupeKey: `booked:${approval.id}` });
+  }
+
   const writer: CalendarWriter = {
     async executeApproved(approvalId) {
       const approval = await approvals.get(approvalId);
       if (!approval) return refuse(null, approvalId, 'unknown_approval');
       if (approval.status === 'executed') {
+        await flagBooked(approval, deps.kind(approval.kind));
         return { ok: true, eventIds: (await writesOf(approvalId)).map((w) => w.event_id) };
       }
       if (approval.status === 'failed') return { ok: false, reason: approval.error ?? DEFAULT_REASON };
@@ -102,6 +123,7 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
           detail: { approvalId, ref: approval.ref, ...(result.ok ? { events: result.eventIds.length } : { reason: result.reason }) },
         });
       }
+      if (result.ok) await flagBooked(approval, kind);
       return result;
     },
 

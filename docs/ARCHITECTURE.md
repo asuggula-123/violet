@@ -61,7 +61,7 @@ the same commit.
 | I11 | Everything the Brain releases to another agent (brief, later guidance) passes `EgressGuard` (blocks private calendar phrases the owner did not use themselves) and the **taint rule**: if the Brain read untrusted content in the same turn, the release is held for a yes/no from the owner showing the exact text. The owner is always shown, in code-rendered text, exactly what was released. |
 | I12 | Peer agents must be in the same household. Limits per pair: open conversations ≤ 3, new conversations per day ≤ 10, messages per side per conversation ≤ 12, `ask_owner` per side per conversation ≤ 2. |
 | I13 | Text authored by another agent or a stranger is sanitized (control chars and newlines stripped, length capped) and quoted before it is shown to an owner. It can never forge a second line or an approval prompt. |
-| I14 | Paused agent: the gateway refuses every send except the single pause/resume ack. The router stores inbound and does nothing else. The scheduler skips the agent. The Envoy does not run. |
+| I14 | Paused agent: the gateway refuses every send except the single pause/resume ack. The router stores inbound (and, for strangers, raises the `message_taken` digest flag, which sends nothing) and does nothing else; a message once held stays held on every retry of its job, even after a resume. The scheduler skips the agent. The Envoy does not run. |
 | I15 | Every inbound, outbound, suppressed send, model turn, tool call, denied tool call, approval change, calendar write, draft, a2a message, flag, digest, pause/resume and pairing writes an `action_log` row. A DB trigger blocks UPDATE/DELETE/TRUNCATE on `action_log`. |
 | I16 | Secrets come from env vars only. Google refresh tokens are encrypted at rest (AES-256-GCM, key from env). Nothing secret is logged. |
 | I17 | Immediate texts to an owner are only: replies to their own message, approval prompts, Envoy questions, and urgent flags. Urgent non-approval flags are budgeted (≤ 3 per local day) and respect quiet hours (22:00–07:00 owner time). Everything else waits for the digest. |
@@ -75,7 +75,7 @@ the same commit.
 - **Db adapter**: one interface, two drivers. `PgDb` (node-postgres) for real Postgres. `PgliteDb` (Postgres compiled to WASM, in-process) for zero-setup tests, the demo, and local dev when `DATABASE_URL` is unset. Driver differences are hidden in the adapter: never read `bigint` columns raw (cast `::int` / `::text` in SQL), always `count(*)::int`.
 - IDs: `crypto.randomUUID()` stored as `text`. Times: `timestamptz`. No `Date.now()` in app code — everything takes a `Clock`.
 - Tests: `vitest`. Default driver PGlite in-memory. If `TEST_DATABASE_URL` is set, each test world creates and drops its own schema in real Postgres. Both must pass.
-- Scripts: `npm run build` (tsc to `dist/`, copies the `.sql` migrations), `npm run typecheck`, `npm test`, `npm run test:pg`, `npm run migrate`, `npm run dev`, `npm run demo`, `npm run owner:add`, `npm run google:link`.
+- Scripts: `npm run build` (tsc to `dist/`, copies the `.sql` migrations), `npm run typecheck`, `npm test`, `npm run test:pg`, `npm run migrate`, `npm run dev`, `npm run demo`, `npm run owner:add`, `npm run google:link`. The CLIs also run from the build with no dev dependency: `npm run migrate:prod`, `owner:add:prod`, `google:link:prod` (`node dist/cli/<name>.js`).
 - Test personas are **Alex** and **Sam**. No real names, numbers, emails or keys anywhere in the repo.
 - `.gitignore`: `node_modules`, `dist`, `.env*` (except `.env.example`), `.data`, `.worktrees`.
 
@@ -96,11 +96,11 @@ src/
   transport/           types.ts, fake.ts, telegram/*
   llm/                 types.ts (LlmClient), anthropic.ts, scripted.ts, toolLoop.ts
   brain/               brain.ts, prompt.ts, tools/*, untrusted.ts
-  approvals/           service.ts, resolver.ts, calendarWriter.ts
+  approvals/           module.ts, service.ts, resolver.ts, calendarWriter.ts, calendarEvent.ts, repo.ts, line.ts, types.ts
   google/              types.ts, fake.ts, oauth.ts, routes.ts, http.ts, allowlist.ts, errors.ts, api.ts, services.ts,
                        calendar.ts, gmail.ts, mime.ts, draft.ts, time.ts, tokens.ts, crypto.ts, scopes.ts
   a2a/                 types.ts, service.ts, envoy.ts, envoyTools.ts, egress.ts, outcome.ts, render.ts
-  flags/               digest.ts, conflicts.ts, budget.ts
+  flags/               module.ts, policy.ts, digest.ts, digestStore.ts, render.ts, conflicts.ts, time.ts, types.ts
   cli/                 migrate.ts, ownerAdd.ts, googleLink.ts, demo.ts, chat.ts
 test/
   helpers/world.ts     createTestWorld()
@@ -143,7 +143,9 @@ rows written at the same clock instant (the FakeClock makes that common). Order 
 - `a2a_sides(conversation_id, agent_id, brief, owner_notes jsonb, cleared_text, availability_calls int, messages_sent int, owner_questions int, awaiting_owner bool, primary key(conversation_id, agent_id))`
 - `a2a_messages(id, conversation_id, seq int, from_agent_id null, kind 'open'|'text'|'proposal'|'accept'|'decline'|'system'|'close', body, payload jsonb, created_at, unique(conversation_id, seq))`
 
-**005_flags.sql (M5)** — `digests(id, agent_id, local_date, body, sent_at, unique(agent_id, local_date))`
+**005_flags.sql (M5)**
+- `flags` gains `held_until null` (held for quiet hours), `budget_date date null` (owner-local date whose budget it uses), `attempt_at null` (send lease), `overflowed_at null` (a `now` flag turned digest item), `digest_id null` (the one digest carrying it), `retry_at null` + `send_failures` (release-task backoff after a retryable send failure). A **digest item** = `status 'pending'` and (`urgency 'digest'` or `overflowed_at` set); it becomes `sent` (+ `digest_date`) when its digest is delivered.
+- `digests(id, agent_id, local_date, body null, status 'sending'|'sent'|'empty'|'rolled_over', item_count, left_out, created_at, lease_until null, sent_at null, send_failures, unique(agent_id, local_date))` — a row closes the date; `body` null = empty.
 
 **006_transport.sql (M6)** — `telegram_state(bot_id pk, last_update_id)`
 
@@ -263,13 +265,16 @@ export interface GmailProvider {
 export interface FlagService {
   raise(agentId: string, f: { kind: string; urgency: 'now' | 'digest'; text: string; dedupeKey?: string }): Promise<void>;
 }
+// app.flags is a FlagHub = FlagService + setNowDelivery(fn): the hook M5 uses to install the I17 policy.
+
+// src/core/later.ts re-exports DigestService from src/flags/types.ts (M5): registerKind, addSection, runDue, preview.
 
 // src/core/jobs.ts — DB-backed queue; one running job per lane (lane = agent id)
 export interface JobQueue {
   register(type: string, handler: (payload: any) => Promise<void>): void;
   enqueue(type: string, payload: unknown, opts?: { lane?: string; runAt?: Date; dedupeKey?: string; tx?: Queryable }): Promise<void>; // tx: commit with the caller's transaction
   pump(): Promise<number>;           // recover stale running jobs, then run all runnable ones; returns how many ran
-  start(): void; stop(): Promise<void>;
+  start(): void; stop(): Promise<void>;   // stop: finish the job in flight, claim no more (backlog stays queued)
 }
 // Each handler runs inside runInJob(job.id, …) (src/core/jobContext.ts); currentJobId()
 // tells code below it which job (and so which retry) it belongs to.
@@ -293,7 +298,7 @@ export interface AppDeps { db: Db; clock: Clock; transport: Transport; llm: LlmC
 export interface Module { name: string; install(app: App): void | Promise<void> }
 export interface App {
   deps: AppDeps;
-  repos: Repos; actionLog: ActionLog; gateway: OutboundGateway; jobs: JobQueue; scheduler: Scheduler; flags: FlagService; router: Router;
+  repos: Repos; actionLog: ActionLog; gateway: OutboundGateway; jobs: JobQueue; scheduler: Scheduler; flags: FlagHub; router: Router;
   ingest(msg: InboundMessage): Promise<void>;     // persist + enqueue, fast
   settle(): Promise<void>;                        // pump until idle (tests, demo)
   start(): Promise<void>; stop(): Promise<void>;
@@ -368,6 +373,13 @@ Without `ADMIN_TOKEN` the routes are not registered (I1).
 - Polling mode (`TELEGRAM_MODE=polling`, local dev): per bot, `deleteWebhook` once, then long-poll `getUpdates`; the offset (`telegram_state`, with the time of the last ingested update) advances only after an update is ingested. An offset over 6 days old is not sent (Telegram may restart update ids at a random lower value after a week without updates); the stored id then follows the new ids down, and redeliveries are deduplicated by ingest.
 - `owner:add --transport telegram [--bot-username <name>]` prints the exact `/start <code>` text and a `t.me/<bot>?start=<code>` link.
 
+### Deploy (ops)
+
+- `Dockerfile` (Node 22 slim, multi-stage, prod deps only, user `node`, `CMD ["node","dist/main.js"]`), `fly.toml`, `docker-compose.yml` (`--profile app`: the image on the fake transport), `docs/DEPLOY.md`.
+- Exactly **one** process/machine: `scheduler.runDue` has no cross-process claim (read state, run, write `last_run_at`), so two machines run every task twice. The job queue, webhook ingest and `migrate()` are multi-process safe.
+- Migrations run at boot in `main.ts`; production needs `DATABASE_URL`: `openDb` (`src/db/open.ts`) refuses the PGlite fallback when `NODE_ENV=production`, for the server and every CLI (`DATABASE_URL is missing: ...`).
+- Shutdown on SIGTERM/SIGINT: stop Telegram → close HTTP → `app.stop()` (awaits the scheduler tick in flight, then `jobs.stop()`) → close db → exit 0.
+
 ## 8. Flows
 
 ### 8.1 Inbound routing (deterministic, before any model)
@@ -380,7 +392,7 @@ Without `ADMIN_TOKEN` the routes are not registered (I1).
    - Paused → store, log (`inbound.held`), stop. Held = the agent is paused at processing time **or** was paused when the message arrived (`paused_at_arrival`). This includes messages that arrived before the pause but are processed after it, retries of older jobs, and messages that arrived while paused whose job runs after a later `resume` was ingested.
    - `ownerInterceptors` (approval resolver) → handled? stop.
    - `onOwnerMessage` (the Brain).
-5. Sender is not owner (I3): upsert contact, store message, log. Paused (same held rule as step 4) → stop. Otherwise raise a `digest` flag (`Message from “<name>”: “<text>”`, both quoted, I13), then send the canned reply if none was sent to this contact in the last 12 h. The flag comes first so a canned reply that can never be delivered does not keep it back. The canned reply is **best-effort**: one attempt; every attempt leaves an outbound row (I15): a failure before or during the send is logged as `outbound.failed`, and a text that was delivered is logged as `outbound.sent` even if storing its `messages` row then fails (`recorded: false`). A failure never fails the job, retries or holds the lane.
+5. Sender is not owner (I3): upsert contact, store message, log. Raise a `digest` flag (`Message from “<name>”: “<text>”`, both quoted, I13; it sends nothing). Paused (same held rule as step 4) → log `inbound.held`, raise that flag, stop: no canned reply, ever, for a held message, and the message is in the first digest after resume (8.6). Otherwise send the canned reply if none was sent to this contact in the last 12 h. The flag comes first so a canned reply that can never be delivered does not keep it back. The canned reply is **best-effort**: one attempt; every attempt leaves an outbound row (I15): a failure before or during the send is logged as `outbound.failed`, and a text that was delivered is logged as `outbound.sent` even if storing its `messages` row then fails (`recorded: false`). A failure never fails the job, retries or holds the lane.
 6. Unsupported media: owner gets "I can only read text for now."; strangers get the normal canned flow.
 
 Action names written by M1 (I15): `inbound.received`, `inbound.duplicate`, `inbound.dropped`, `inbound.held`,
@@ -408,10 +420,11 @@ Added by M4: `talk_to_agent`, `tell_envoy`, `list_agent_conversations`, `read_ag
 
 - `approvals.request(agentId, { kind, payload, groupId?, expiresAt? })` → the registered kind renders a **one-line** prompt from the payload → sent at once: `#7 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it? Reply yes or no.` (with yes/no buttons where the transport supports them).
 - Resolver (owner interceptor): matches `yes|y|yep|yeah|ok|okay|sure|approve|do it|go ahead|👍` / `no|n|nope|nah|don't|decline|cancel|👎`, optionally followed by `#?<ref>`. Target = explicit ref (only an approval that already existed when the message was written: `created_after_message_seq` < the message's `seq` AND `created_after_arrival_seq` < the arrival seq of the message's inbound event) → else the prompt being replied to → else the only pending approval whose prompt was delivered **before** the message was written (its outbound row's `seq` < the message's `seq` AND `prompt_sent_after_arrival_seq` < the message's event arrival seq; an undelivered prompt, or one sent after the owner wrote — e.g. created by the Brain turn of that very message and found on a hook retry, or by the Brain turn of an earlier message while this one waited in the lane — is never the implicit target). Arrival order is `inbound_events.arrival_seq` (bigserial, added by 002, allocated at ingest); the owner's stored message carries `meta.inboundEventId`; the approval records the sequence's high-water mark (allocated values, so in-flight ingests count as arrived) at creation and at markSent → else ask "Which one?" with a one-line list of those. A reply-to that names no prompt of this agent never picks the implicit target: "Which one?" if any are answerable. No answerable approvals → not handled (falls through to the Brain). Button payloads `approve:<id>` / `deny:<id>` resolve directly.
-- Kinds register `{ schema, render(payload, { timezone }), onApproved?, onDenied?, onExpired?, calendarEvents?(payload), guard?(approval) }` (`src/approvals/types.ts`). M2: `calendar_event`. M4: `a2a_outcome`, `a2a_release`.
+- Kinds register `{ schema, render(payload, { timezone }), onApproved?, onDenied?, onExpired?, calendarEvents?(payload), booked?(payload, { timezone }), guard?(approval) }` (`src/approvals/types.ts`). M2: `calendar_event`. M4: `a2a_outcome`, `a2a_release`.
 - `request(agentId, { kind, payload, groupId?, expiresAt?, idempotencyKey? })` validates with the kind's schema, stores the parsed payload, allocates the ref, and composes the prompt **by code**: `#<ref> <render(...)> Reply yes or no.` — the rendered part is sanitized (control characters and line breaks stripped), NFKC-normalized, every number sign (`#`, `＃`, `﹟`) removed, capped at 240 chars. A kind may cap the expiry with `latestExpiry(payload)` (`calendar_event`: the event's start). Buttons: `approve:<id>` / `deny:<id>`. Paused → stored unsent; `onResume` and the sweep send unsent pending prompts (after expiring what lapsed, so a stale prompt is never sent). Every send first takes an atomic claim (`prompt_sending_until`, 2 min lease), so concurrent senders deliver a prompt once. The same `idempotencyKey` returns the existing approval.
 - Resolution: one `UPDATE … WHERE status = 'pending' AND expires_at > now` setting `resolved_by_message_id`; a retried hook finds its own resolution by that id and re-runs the (idempotent) callbacks. `onApproved` / `onDenied` return the one-line reply (defaults: `Okay, approved #n.` / `Okay, not doing #n.`). Not open → `#n isn't open any more.`; ambiguous → `Which one? #1 … · #2 … — reply yes 1 or no 1.` A button for an approval of another agent resolves nothing. Before targeting, the resolver expires pending approvals past `expires_at` (the sweep does not run while paused), so a late yes gets the not-open text; `listPending` likewise omits them, and `executeApproved` refuses an approval resolved after its expiry.
 - `cancel(id, reason)`, `get`, `listPending`, `expireDue`, `sendUnsent`; `approvals.calendar` is the `CalendarWriter`: `executeApproved(id)` (requires `approved`, runs `guard`, books `calendarEvents(stored payload)` with keys `approval:<id>:<n>`, records `calendar_writes`, marks `executed`; an event that has already started is refused (`failed`, "the event has already started"); a failure undoes what it wrote and marks `failed` with a safe reason; anything not `approved` throws `CalendarWriteRefused`) and `undo(id)`.
+- Booked items: a kind with `booked(payload, { timezone })` gets one `digest` flag of kind `booked` from `CalendarWriter` once its events are booked (`codeLine` in `line.ts`, which `composePrompt` uses too: one line, NFKC, number signs removed, ≤ 240 chars; dedupe `booked:<approval id>`). It is raised again (a no-op) every time `executeApproved` finds the approval `executed`, so a crash between booking and flag is repaired by the retried resolution. `calendar_event`: `Dinner — Fri Nov 13, 7:00–8:30 PM`. A denied or failed approval raises none.
 - Default expiry 24 h. The per-agent `approvals.sweep` (every minute) marks expired, calls `onExpired`, raises a `digest` flag, and sends unsent prompts.
 - Action names (I15): `approval.requested`, `approval.approved`, `approval.denied`, `approval.ambiguous`, `approval.not_open`, `approval.cancelled`, `approval.expired`, `approval.executed`, `approval.failed`, `calendar.event_created`, `calendar.event_deleted`, `calendar.write_refused`.
 
@@ -428,13 +441,20 @@ Each delivery runs one **Envoy turn** on the receiving side: context = own brief
 
 ### 8.5 Flags, digest, proactive
 
-- `now` flags: one line, at once, within budget and quiet hours (I17). Approval prompts and Envoy questions are never budgeted.
+- `now` flags: one line, at once, within budget and quiet hours (I17). Approval prompts and Envoy questions are never budgeted (they do not go through flags). A paused agent texts no flag: it becomes a digest item.
 - `digest` flags: held. At the owner's local `digest_hour` (default 18:00), once per local date, code renders the digest: messages taken, agent conversations opened/closed, drafts created, things booked, approvals still waiting, overflowed flags. Empty → nothing sent.
 - Conflict check: hourly, looks 36 h ahead for overlapping events; a new overlap raises a `now` flag once (dedupe key = the event pair).
 
+**Details (M5, `src/flags/`).** All rendering is code; no model call.
+- *Now policy* (`policy.ts`, installed by `flagsModule` through `app.flags.setNowDelivery`, so captured `FlagService`s keep working). Each delivery decision runs in one transaction under the agent row lock (`FOR UPDATE`): paused → digest item (`flag.overflow` reason `paused`); quiet hours [22:00, 07:00) owner-local → `held_until` = next 07:00 (`flag.held`); else, if held flags of the agent are already due (`held_until` ≤ now), they are texted first, oldest first, before this flag decides (so a flag raised before the 07:00 release tick never takes the budget ahead of them); then the owner-local date's budget (3; a reserved send counts) → reserve and send, or digest item (`flag.overflow` reason `budget`, `held: true` for a released one). A send holds a 2-minute lease (`attempt_at`); a retryable failure frees it, sets `retry_at` (backoff 1 min doubling to 15 min, at least the transport's `retryAfterMs`) and rethrows (a retried raise finishes the delivery at once; only the release task waits for `retry_at`), a permanent one or a suppressed send makes the flag a digest item (`send_failed` / `suppressed`, budget refunded). A lease left by a crash is retried after it expires unless the gateway already recorded that text. Scheduler task `flags.release` (every tick) texts due held flags oldest first (`flag.released`) and retries failed sends.
+- *Digest* (`digest.ts`). Task `digest.run` (every tick) per agent: due from `digest_hour` on (owner-local); inside quiet hours only during `digest_hour` itself, so catch-up never runs in quiet hours. Paused, quiet or unpaired → `digest.deferred {date, reason}` once per date and reason. Build = one transaction under the agent row lock: render the undelivered items plus live sections, insert the date's row with a 2-minute send lease, tie the items to it (`digest_id`). Send the stored body; success → `sent` (+ items) and `digest.sent {date, items, leftOut}`; nothing to say → `empty`, `digest.empty`; retryable failure → the lease is kept until a backoff (1 min doubling to 15 min, at least `retryAfterMs`), one `digest.deferred send_failed {attempt, retryAt}` per attempt, retried with the same body; permanent failure, or a date that ends undelivered → `rolled_over`, items back to the pool for the next date (`digest.deferred day_ended|send_failed`). Before re-sending, a body the gateway already recorded is marked sent instead. Delivery is at least once only across a crash between the transport send and the gateway's record.
+- *Rendering* (`render.ts`): `Today:`, then sections by `order`: `Messages taken` (`message_taken`), `Agent conversations` (`a2a_opened`, `a2a_closed`, raised by M4), `Drafts` (`draft_created`), `Booked` (`booked`, `a2a_booked`), `Waiting for you` (live, added by `approvalsModule`: `listPending` — pending and unexpired — one line per approval, its stored prompt without ` Reply yes or no.`, so `#ref` stays answerable as `yes #7`), `Also` (`approval_expired`, overflowed `now` flags, unknown kinds). One `- ` line per item (re-sanitized, I13), ≤ 10 per section then `+N more`, whole body ≤ 3500 chars cut on whole lines with `+N more not shown`; left-out items count as delivered. `app.digest`: `registerKind(kind, sectionKey)`, `addSection({key, title, order, lines?(agentId, range)})` (same key replaces; a live section that throws or does not answer within 5 s is logged and omitted; live sections run in parallel and `runDue` works on up to 4 agents at once, so one slow agent does not hold back the others), `runDue(now)`, `preview(agentId)` (writes nothing). A module that registers sections installs after `flagsModule`.
+- *Conflict check* (`conflicts.ts`, `registerPerAgent('flags.conflicts', 1 h)`): `listEvents(now, now+36h)`; timed events only (all-day and zero-length never conflict; touching is not overlap; `CalendarEvent` has no free/cancelled marker and the real provider drops cancelled events); pairs ordered by overlap start; at most 3 new pairs per run; kind `calendar_conflict`, dedupe key `conflict:` + sorted `id@startISO` of both, so a moved event flags again. Text is one code-rendered line with quoted titles and today/tomorrow/weekday words in the owner's zone; in quiet hours it is worded for the 07:00 delivery and overlaps over by then are skipped. Any provider or delivery error → one log line (error class only), no flag, never thrown.
+- Action names (I15): `flag.held`, `flag.released`, `flag.overflow`, `digest.sent`, `digest.empty`, `digest.deferred`.
+
 ### 8.6 Pause
 
-`pause` → state flips at ingest (never behind the lane's backlog), one ack, then silence to everyone (I14). Because the gateway checks `paused` at send time, nothing an older job or its retry tries to send gets out once the pause is ingested. Messages that arrive while paused stay held even if a `resume` is ingested before their job runs. `resume` → ack, `onResume` hooks run (waiting Envoy turns are re-queued; stranger messages taken meanwhile appear in the next digest).
+`pause` → state flips at ingest (never behind the lane's backlog), one ack, then silence to everyone (I14). Because the gateway checks `paused` at send time, nothing an older job or its retry tries to send gets out once the pause is ingested. Messages that arrive while paused stay held even if a `resume` is ingested before their job runs, and a job that recorded its `held` step stays held on retry after a resume (it only finishes its flag step). `resume` → ack, `onResume` hooks run (unsent approval prompts are sent; waiting Envoy turns are re-queued). Stranger messages taken while paused were stored with their `message_taken` digest flag (8.1 step 5) but got no canned reply; they appear in the first digest after resume (the digest is deferred while paused).
 
 ## 9. Milestones
 

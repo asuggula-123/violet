@@ -1,4 +1,6 @@
-# Local development only. Production uses a managed Postgres.
+# Local development only. Production uses a managed Postgres (docs/DEPLOY.md).
+#   docker compose up -d postgres              Postgres for `npm run dev` / `npm run test:pg`
+#   docker compose --profile app up --build    + the app image, fake transport, no keys
 services:
   postgres:
     image: postgres:16
@@ -7,8 +9,33 @@ services:
       POSTGRES_PASSWORD: violet
       POSTGRES_DB: violet
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U violet -d violet"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    profiles: ["app"]
+    build: .
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # development (not production) so the admin-token dev endpoints /dev/inbound and
+      # /dev/outbox exist; they never exist with NODE_ENV=production.
+      NODE_ENV: development
+      PORT: "8080"
+      DATABASE_URL: postgres://violet:violet@postgres:5432/violet
+      TRANSPORT: fake
+      # A fake placeholder for local use only. Override: ADMIN_TOKEN=... docker compose ...
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-local-dev-admin-token-not-a-secret}
+
 volumes:
   pgdata:

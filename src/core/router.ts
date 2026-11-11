@@ -282,28 +282,34 @@ export function createRouter(deps: Deps): Router {
     const contact = await repos.contacts.get(contactId);
     if (!contact) throw new Error(`contact ${contactId} vanished`);
 
+    // The owner learns of the message first (flow 8.1 step 5): a canned reply that can
+    // never be delivered (the stranger blocked the bot) must not keep this flag back.
+    // A 'digest' flag sends nothing, so it is raised while paused too (8.6): the message
+    // is in the first digest after resume, and the agent stays silent until then (I14).
+    const flagTaken = () =>
+      steps.once('flag', async () => {
+        // I13: the display name is stranger-authored too, so it is quoted like the text.
+        const who = quote(contact.display_name ?? contact.address, 80);
+        const what = msg.kind === 'unsupported' ? '(a non-text message)' : quote(msg.text, 200);
+        await flags.raise(agent.id, {
+          kind: 'message_taken',
+          urgency: 'digest',
+          text: `Message from ${who}: ${what}`,
+          dedupeKey: `message:${messageId}`,
+        });
+        return true;
+      });
+
     if (held) {
       await steps.atomic('held', async (s) => {
         await s.log({ agentId: agent.id, actor: 'system', action: 'inbound.held', detail: { reason: 'paused', messageId } });
         return true;
       });
+      await flagTaken();
       return;
     }
 
-    // The owner learns of the message first (flow 8.1 step 5): a canned reply that can
-    // never be delivered (the stranger blocked the bot) must not keep this flag back.
-    await steps.once('flag', async () => {
-      // I13: the display name is stranger-authored too, so it is quoted like the text.
-      const who = quote(contact.display_name ?? contact.address, 80);
-      const what = msg.kind === 'unsupported' ? '(a non-text message)' : quote(msg.text, 200);
-      await flags.raise(agent.id, {
-        kind: 'message_taken',
-        urgency: 'digest',
-        text: `Message from ${who}: ${what}`,
-        dedupeKey: `message:${messageId}`,
-      });
-      return true;
-    });
+    await flagTaken();
     // Best-effort: one attempt. The gateway logs every attempt (outbound.failed before
     // or during the send, outbound.sent once delivered, even if recording it then
     // fails); a failure never fails the job, retries, or holds the lane.
@@ -330,8 +336,11 @@ export function createRouter(deps: Deps): Router {
   async function route(event: InboundEventRow, agent: AgentRow, msg: InboundMessage): Promise<void> {
     const steps = stepsFor(event);
     // I14: held if the agent is paused now, or was paused when the message arrived
-    // (a resume ingested before this job ran does not release it).
-    const held = agent.paused || event.progress?.[PAUSED_AT_ARRIVAL_STEP] === true;
+    // (a resume ingested before this job ran does not release it). A recorded 'held'
+    // step is sticky: a retry of a held job (its flag step failed) stays held after a
+    // resume, so it only finishes that step and never sends the canned reply (8.1 step 5).
+    const held =
+      agent.paused || event.progress?.[PAUSED_AT_ARRIVAL_STEP] === true || event.progress?.held !== undefined;
     const decision = await steps.atomic('route', async (s): Promise<'paired' | 'owner' | 'stranger'> => {
       if (await tryPairing(s, agent, msg, event.id)) return 'paired';
       return isOwner(agent, msg) ? 'owner' : 'stranger';

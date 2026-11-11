@@ -43,6 +43,11 @@ export interface ApprovalKind<P = any> {
   onExpired?(ctx: KindContext): Promise<void>;
   /** The events CalendarWriter books for an approved approval, built from the stored payload (I6). */
   calendarEvents?(payload: P): NewCalendarEvent[];
+  /**
+   * One line for the digest's 'Booked' section once CalendarWriter has booked it (raised as
+   * a 'booked' digest flag, made one line with no number sign by code). Omit for no line.
+   */
+  booked?(payload: P, ctx: { timezone: string }): string;
   /** The latest the approval may stay open (e.g. an event's start): caps expiresAt. */
   latestExpiry?(payload: P): Date;
   /** Runs inside CalendarWriter before any write. Throw (ideally with `ownerMessage`) to refuse. */

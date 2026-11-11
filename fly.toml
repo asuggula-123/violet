@@ -1,0 +1,58 @@
+# Fly.io config for Violet. See docs/DEPLOY.md. Nothing here is secret: every secret
+# is set with `fly secrets set` and never written to this file.
+
+# CHANGE THESE: app names are global on Fly; pick a region near you (`fly platform regions`).
+app = "violet-app"
+primary_region = "ams"
+
+# SIGTERM runs main.ts's shutdown: stop Telegram, close the HTTP server, wait for the
+# scheduler tick and the job in flight (one Brain turn can take a while), close the db,
+# exit 0. A job cut off by a hard kill is retried only after the 10-minute visibility
+# timeout (src/core/jobs.ts), and holds its owner's lane until then, so allow time.
+kill_signal = "SIGTERM"
+kill_timeout = "120s"
+
+# Migrations run at boot in src/main.ts (before the server listens), under a Postgres
+# advisory lock (src/db/migrate.ts), so no separate release command is needed.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  # Exactly one machine (see [http_service]). "rolling" stops the old machine before the
+  # new one starts; never use bluegreen/canary, which run two machines at once.
+  strategy = "rolling"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+  TRANSPORT = "telegram"
+  TELEGRAM_MODE = "webhook"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # The scheduler, the daily digest and the job queue run inside this process: the
+  # machine must never be stopped for being idle.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  # Run exactly ONE machine (`fly deploy --ha=false`, `fly scale count 1`).
+  # Two machines are NOT safe: src/core/scheduler.ts reads scheduler_state, runs the task
+  # and only then writes last_run_at, with no lock or claim, so every task (digest
+  # included) would run once per machine. The rest would cope: the job queue
+  # (src/core/jobs.ts) claims with FOR UPDATE SKIP LOCKED plus a unique index on running
+  # lanes, webhook ingest dedupes on the Telegram update id, and migrations take an
+  # advisory lock. Telegram's partial-send memory is per process (a retry on another
+  # machine resends the whole message).
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

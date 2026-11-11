@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTestWorld, type TestWorld } from '../helpers/world.js';
 
+/**
+ * The bare M1 FlagService ('now' = text at once). With defaultModules, flagsModule swaps in
+ * the I17 policy (budget, quiet hours, pause): that is tested in test/unit/flags/policy.test.ts.
+ */
 describe('FlagService (basic)', () => {
   let w: TestWorld;
   beforeEach(async () => {
-    w = await createTestWorld();
+    w = await createTestWorld({ modules: [] });
   });
   afterEach(async () => w.close());
 

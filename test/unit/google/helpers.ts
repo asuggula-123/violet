@@ -4,7 +4,7 @@ import { expect } from 'vitest';
 import { parseConfig } from '../../../src/config.js';
 import { createGoogle, type GoogleServices } from '../../../src/google/services.js';
 import { DEFAULT_SCOPES } from '../../../src/google/scopes.js';
-import { createTestWorld, type TestWorld } from '../../helpers/world.js';
+import { createTestWorld, type TestWorld, type WorldOptions } from '../../helpers/world.js';
 
 export interface StubResponse {
   status?: number;
@@ -93,8 +93,8 @@ export function googleEnv(extra: Record<string, string> = {}): Record<string, st
   };
 }
 
-export async function createGoogleWorld(env: Record<string, string> = {}): Promise<GoogleWorld> {
-  const w = await createTestWorld();
+export async function createGoogleWorld(env: Record<string, string> = {}, world: WorldOptions = {}): Promise<GoogleWorld> {
+  const w = await createTestWorld(world);
   const stub = new StubFetch();
   const logs: string[] = [];
   const log = pino({ level: 'debug' }, { write: (s: string) => void logs.push(s) });

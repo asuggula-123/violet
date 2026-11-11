@@ -28,14 +28,24 @@ describe('concurrent resolution', () => {
     const resolver = w.app.router.hooks.ownerInterceptors[0]!;
     const ctxs = await Promise.all([ownerMessage('yes'), ownerMessage('yes #1'), ownerMessage('👍'), ownerMessage('no')]);
     const handled = await Promise.all(ctxs.map((c) => resolver(c)));
-    expect(handled).toEqual([true, true, true, true]);
     const row = (await w.app.approvals!.get(a.id))!;
     expect(['executed', 'denied']).toContain(row.status);
-    expect(ctxs.map((c) => c.messageId)).toContain(row.resolved_by_message_id);
+    const winner = ctxs.findIndex((c) => c.messageId === row.resolved_by_message_id);
+    expect(winner).toBeGreaterThanOrEqual(0);
     const decided = [...(await w.actions({ action: 'approval.approved' })), ...(await w.actions({ action: 'approval.denied' }))];
     expect(decided).toHaveLength(1);
     expect(w.calendar.writes.filter((x) => x.op === 'create').length).toBe(row.status === 'executed' ? 1 : 0);
-    expect((await w.actions({ action: 'approval.not_open' })).length).toBe(3);
+    // Each loser either looked while #1 was still pending, lost the atomic UPDATE and got the
+    // not-open reply, or looked after it was resolved: then a bare yes/no has nothing
+    // answerable and is not handled (8.3: falls through to the Brain). The explicit
+    // 'yes #1' always names #1, so it is always handled. Which happens is timing only.
+    expect(handled[winner]).toBe(true);
+    expect(handled[1]).toBe(true);
+    const notOpen = new Set((await w.actions({ action: 'approval.not_open' })).map((r) => r.detail.messageId));
+    ctxs.forEach((c, i) => {
+      if (i !== winner) expect(notOpen.has(c.messageId)).toBe(handled[i]);
+    });
+    expect(notOpen.size).toBe(handled.filter(Boolean).length - 1);
   });
 
   it('concurrent requests allocate distinct refs and one approval per idempotency key', async () => {

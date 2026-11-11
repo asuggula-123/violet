@@ -2,7 +2,7 @@ import type { Logger } from 'pino';
 import type { Clock } from './clock.js';
 import type { Config } from './config.js';
 import { createActionLog, type ActionLog } from './core/actionLog.js';
-import { createFlagService, type FlagService } from './core/flags.js';
+import { createFlagService, type FlagHub } from './core/flags.js';
 import { createJobQueue, type JobQueue, type JobQueueOptions } from './core/jobs.js';
 import type { A2AService, ApprovalService, Brain, DigestService } from './core/later.js';
 import { createOutbound, type OutboundGateway } from './core/outbound.js';
@@ -37,7 +37,8 @@ export interface App {
   gateway: OutboundGateway;
   jobs: JobQueue;
   scheduler: Scheduler;
-  flags: FlagService;
+  /** FlagService; flagsModule (M5) installs the I17 policy through its hook. */
+  flags: FlagHub;
   router: Router;
   /** Persist + enqueue, fast. */
   ingest(msg: InboundMessage): Promise<void>;
@@ -73,6 +74,8 @@ export async function buildApp(deps: AppDeps, modules: readonly Module[], opts: 
   jobs.register(INBOUND_JOB, (p: { inboundEventId: string }) => router.process(p.inboundEventId));
 
   let schedulerTimer: NodeJS.Timeout | null = null;
+  /** The scheduler tick in flight, awaited by stop() so the db is not closed under it. */
+  let schedulerRun: Promise<void> | null = null;
 
   const app: App = {
     deps,
@@ -128,11 +131,9 @@ export async function buildApp(deps: AppDeps, modules: readonly Module[], opts: 
     async start() {
       jobs.start();
       const tick = async () => {
-        try {
-          await scheduler.runDue();
-        } catch (err) {
-          log.error({ err }, 'scheduler tick failed');
-        }
+        schedulerRun = scheduler.runDue().catch((err: unknown) => log.error({ err }, 'scheduler tick failed'));
+        await schedulerRun;
+        schedulerRun = null;
         if (schedulerTimer) schedulerTimer = setTimeout(() => void tick(), opts.schedulerTickMs ?? 30_000);
       };
       schedulerTimer = setTimeout(() => void tick(), 0);
@@ -141,6 +142,7 @@ export async function buildApp(deps: AppDeps, modules: readonly Module[], opts: 
     async stop() {
       if (schedulerTimer) clearTimeout(schedulerTimer);
       schedulerTimer = null;
+      await schedulerRun;
       await jobs.stop();
     },
   };

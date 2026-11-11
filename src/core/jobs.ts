@@ -79,6 +79,8 @@ export function createJobQueue(
   const backoff = opts.backoffMs ?? defaultBackoffMs;
   let timer: NodeJS.Timeout | null = null;
   let running: Promise<number> | null = null;
+  /** Set by stop(): the drain in flight finishes its current job and claims no more. */
+  let halting = false;
 
   const staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
 
@@ -233,7 +235,9 @@ export function createJobQueue(
   async function drain(): Promise<number> {
     await recoverStale();
     let ran = 0;
-    for (let job = await claim(); job; job = await claim()) {
+    while (!halting) {
+      const job = await claim();
+      if (!job) break;
       await runOne(job);
       ran += 1;
     }
@@ -282,10 +286,16 @@ export function createJobQueue(
       timer = setTimeout(() => void tick(), 0);
     },
 
+    /** Waits for the job in flight only (a backlog stays queued for the next start). */
     async stop() {
       if (timer) clearTimeout(timer);
       timer = null;
-      while (running) await running.catch(() => undefined);
+      halting = true;
+      try {
+        while (running) await running.catch(() => undefined);
+      } finally {
+        halting = false;
+      }
     },
   };
   return queue;

@@ -15,7 +15,10 @@
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "owner:add": "tsx src/cli/ownerAdd.ts",
-    "google:link": "tsx src/cli/googleLink.ts"
+    "google:link": "tsx src/cli/googleLink.ts",
+    "migrate:prod": "node dist/cli/migrate.js",
+    "owner:add:prod": "node dist/cli/ownerAdd.js",
+    "google:link:prod": "node dist/cli/googleLink.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.7.0",

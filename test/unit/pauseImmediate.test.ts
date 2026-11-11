@@ -61,7 +61,8 @@ describe('pause is immediate', () => {
     const contact = (await w.app.repos.contacts.listByAgent(w.alex.agent.id)).find((c) => c.address === 'stranger-1')!;
     expect((await w.app.repos.messages.listByContact(contact.id)).map((m) => m.body)).toEqual(['call me']);
     expect(await w.actions({ action: 'inbound.held' })).toHaveLength(2);
-    expect((await w.app.repos.flags.listByAgent(w.alex.agent.id)).filter((f) => f.kind === 'message_taken')).toHaveLength(0);
+    // 8.6: it waits, unsent, for the first digest after resume.
+    expect((await w.app.repos.flags.listByAgent(w.alex.agent.id)).filter((f) => f.kind === 'message_taken').map((f) => f.status)).toEqual(['pending']);
     const jobs = await w.db.query<{ status: string }>(`SELECT status FROM jobs WHERE type = 'inbound.process' ORDER BY seq`);
     expect(jobs.rows.map((r) => r.status)).toEqual(['done', 'done', 'done']);
     expect(hookCalls).toEqual(['pause']);

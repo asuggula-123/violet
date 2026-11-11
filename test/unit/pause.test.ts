@@ -30,7 +30,11 @@ describe('pause / resume (I14)', () => {
     const stored = await w.app.repos.messages.recent(w.alex.agent.id, 'owner', 10);
     expect(stored.map((m) => m.body)).toContain('what is on today?');
     const flags = await w.app.repos.flags.listByAgent(w.alex.agent.id);
-    expect(flags.map((f) => [f.kind, f.status])).toEqual([['test', 'suppressed']]);
+    // 8.6: the stranger's message waits for the first digest after resume; nothing is sent.
+    expect(flags.map((f) => [f.kind, f.status])).toEqual([
+      ['message_taken', 'pending'],
+      ['test', 'suppressed'],
+    ]);
   });
 
   it('direct gateway calls are refused while paused', async () => {

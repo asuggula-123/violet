@@ -1,0 +1,15 @@
+# Keep the build context to what the image needs: no secrets, no tests, no local data.
+node_modules
+dist
+.data
+.git
+.gitignore
+.env*
+test
+docs
+.worktrees
+*.log
+Dockerfile
+.dockerignore
+docker-compose.yml
+fly.toml
