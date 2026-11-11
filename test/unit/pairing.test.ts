@@ -12,7 +12,7 @@ describe('pairing (flow 8.1 step 3)', () => {
   const phone = 'new-owner-phone';
 
   beforeEach(async () => {
-    w = await createTestWorld();
+    w = await createTestWorld({ modules: [] }); // bare M1 core
     created = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
       name: 'Alex',

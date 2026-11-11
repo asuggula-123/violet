@@ -12,6 +12,7 @@ import { PgDb, PgliteDb, type Db } from '../../src/db/db.js';
 import { migrate } from '../../src/db/migrate.js';
 import { FakeCalendar, FakeGmail } from '../../src/google/fake.js';
 import { ScriptedLlm } from '../../src/llm/scripted.js';
+import { defaultModules } from '../../src/modules.js';
 import { FakeTransport } from '../../src/transport/fake.js';
 import type { InboundMessage } from '../../src/transport/types.js';
 
@@ -33,7 +34,8 @@ export interface SayOptions {
 }
 
 export interface WorldOptions {
-  modules?: Module[];
+  /** Default: defaultModules (the full app). Pass [] for the bare M1 core. */
+  modules?: readonly Module[];
   jobs?: JobQueueOptions;
   start?: Date | string;
 }
@@ -106,7 +108,7 @@ export async function createTestWorld(opts: WorldOptions = {}): Promise<TestWorl
   const log = pino({ level: 'silent' });
   const app = await buildApp(
     { db, clock, transport, llm, calendar, gmail, config, log },
-    opts.modules ?? [],
+    opts.modules ?? defaultModules,
     opts.jobs ? { jobs: opts.jobs } : {},
   );
   const setup: SetupCtx = { repos: app.repos, actionLog: app.actionLog, clock };

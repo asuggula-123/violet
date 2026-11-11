@@ -43,8 +43,10 @@ describe('modules and router hooks', () => {
 });
 
 describe('defaultModules', () => {
-  it('default modules have unique names (M1 ships none; each milestone adds one line)', () => {
+  it('default modules have unique names, and approvals install before the Brain', () => {
     const names = defaultModules.map((m) => m.name);
     expect(new Set(names).size).toBe(names.length);
+    expect(names).toContain('approvals');
+    expect(names.indexOf('approvals')).toBeLessThan(names.indexOf('brain'));
   });
 });

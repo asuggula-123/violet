@@ -6,7 +6,7 @@ import { createTestWorld, type TestWorld } from '../helpers/world.js';
 describe('action log coverage of flow 8.1 (I15)', () => {
   let w: TestWorld;
   beforeEach(async () => {
-    w = await createTestWorld();
+    w = await createTestWorld({ modules: [] }); // bare M1 core
   });
   afterEach(async () => w.close());
 

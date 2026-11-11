@@ -5,7 +5,9 @@ import type { Config } from './config.js';
 import type { Db } from './db/db.js';
 import { FakeCalendar, FakeGmail } from './google/fake.js';
 import { createGoogle, googleConfigured } from './google/services.js';
-import { ScriptedLlm } from './llm/scripted.js';
+import { AnthropicLlm } from './llm/anthropic.js';
+import { UnconfiguredLlm } from './llm/errors.js';
+import type { LlmClient } from './llm/types.js';
 import { FakeTransport } from './transport/fake.js';
 import { telegramTransportFromConfig } from './transport/telegram/transport.js';
 import type { Transport } from './transport/types.js';
@@ -17,14 +19,21 @@ export function createLogger(config: Config): Logger {
   });
 }
 
+/** M2: the Claude API when ANTHROPIC_API_KEY is set; otherwise every model call fails with a typed error. */
+function createLlm(config: Config): LlmClient {
+  if (!config.ANTHROPIC_API_KEY) return new UnconfiguredLlm();
+  return new AnthropicLlm({ apiKey: config.ANTHROPIC_API_KEY, models: { brain: config.VIOLET_MODEL, envoy: config.VIOLET_ENVOY_MODEL } });
+}
+
 function createTransport(config: Config, clock: Clock): Transport {
   if (config.TRANSPORT === 'fake') return new FakeTransport();
   return telegramTransportFromConfig(config, clock);
 }
 
 /**
- * Production wiring of providers. Until the Anthropic client (M2) exists, the
- * in-memory double stands in. Google is real once configured (M3), else fakes.
+ * Production wiring of providers: the Claude API when ANTHROPIC_API_KEY is set, the real
+ * Google providers once Google is configured (else in-memory doubles), and the
+ * transport chosen by TRANSPORT.
  */
 export function createDeps(config: Config, db: Db): AppDeps {
   const clock = new SystemClock();
@@ -34,7 +43,7 @@ export function createDeps(config: Config, db: Db): AppDeps {
     db,
     clock,
     transport: createTransport(config, clock),
-    llm: new ScriptedLlm(),
+    llm: createLlm(config),
     calendar: google?.calendar ?? new FakeCalendar(),
     gmail: google?.gmail ?? new FakeGmail(),
     config,

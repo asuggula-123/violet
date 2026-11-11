@@ -597,13 +597,14 @@ describe('verify M3 r2: source discipline', () => {
     }
   });
 
-  // The Telegram transport (M6) is the other network door: its default fetch binding
-  // talks to api.telegram.org only and never to a Google host.
-  it('only the Google door (http.ts, services.ts binding) and the Telegram transport binding touch fetch', () => {
+  // The other network doors: the Telegram transport (M6), whose default fetch binding
+  // talks to api.telegram.org only, and the Claude API client (M2), which goes through
+  // the official SDK. Neither ever talks to a Google host.
+  it('only the Google door, the Telegram transport binding and the Claude client touch fetch', () => {
     for (const f of src) {
       const text = readFileSync(f, 'utf8');
       if (/globalThis\.fetch|\bfetch\s*\(/.test(text.replace(/this\.fetch\(|deps\.fetch\(|async fetch\(/g, ''))) {
-        expect(f.replace(/\\/g, '/')).toMatch(/src\/(google\/(services|http)|transport\/telegram\/transport)\.ts$/);
+        expect(f.replace(/\\/g, '/')).toMatch(/src\/(google\/(services|http)|transport\/telegram\/transport|llm\/anthropic)\.ts$/);
       }
       expect(text, f).not.toMatch(/from ['"](node-fetch|undici|axios|googleapis|node:https?)['"]/);
     }

@@ -7,7 +7,7 @@ import { createTestWorld, type TestWorld } from '../../helpers/world.js';
 describe('verify M1: invariants', () => {
   let w: TestWorld;
   beforeEach(async () => {
-    w = await createTestWorld();
+    w = await createTestWorld({ modules: [] }); // bare M1 core
   });
   afterEach(async () => w.close());
 

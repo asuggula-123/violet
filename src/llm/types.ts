@@ -26,7 +26,10 @@ export interface LlmRequestMeta {
 }
 
 export interface LlmRequest {
+  /** Stable system text: cached (prompt caching), so keep it byte-identical across requests. */
   system: string;
+  /** Volatile system text (current time, pending items), sent after the cache breakpoint. */
+  systemDynamic?: string;
   messages: LlmMessage[];
   tools: LlmTool[];
   maxTokens: number;
@@ -37,7 +40,14 @@ export interface LlmRequest {
 export interface LlmResponse {
   content: LlmBlock[];
   stopReason: string;
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: LlmUsage;
+}
+
+export interface LlmUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 export interface LlmClient {

@@ -6,9 +6,14 @@ import type { Db } from '../../src/db/db.js';
 import { loadMigrations, migrate, migrationsDir } from '../../src/db/migrate.js';
 import { openTestDb } from '../helpers/world.js';
 
-const CORE_TABLES = [
+const TABLES = [
   'action_log',
   'agents',
+  'approval_refs',
+  'approvals',
+  'brain_tool_memo',
+  'brain_turns',
+  'calendar_writes',
   'contact_notes',
   'contacts',
   'flags',
@@ -39,7 +44,7 @@ describe('migrations', () => {
     const res = await db.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY table_name`,
     );
-    expect(res.rows.map((r) => r.table_name)).toEqual(expect.arrayContaining(CORE_TABLES));
+    expect(res.rows.map((r) => r.table_name)).toEqual(expect.arrayContaining(TABLES));
     const versions = await db.query<{ version: string }>('SELECT version FROM schema_migrations ORDER BY version');
     expect(versions.rows).toEqual(loadMigrations().map((m) => ({ version: m.version })));
   });

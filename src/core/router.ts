@@ -215,7 +215,8 @@ export function createRouter(deps: Deps): Router {
         body: msg.text,
         transportMessageId: msg.transportMessageId,
         replyToTransportMessageId: msg.replyToTransportMessageId ?? null,
-        meta: { kind: msg.kind, ...(msg.buttonPayload ? { buttonPayload: msg.buttonPayload } : {}) },
+        // inboundEventId: M2's resolver orders the message by its event's arrival (principle 5).
+        meta: { kind: msg.kind, inboundEventId: eventId, ...(msg.buttonPayload ? { buttonPayload: msg.buttonPayload } : {}) },
       });
       await s.log({ agentId: agent.id, actor: 'owner', action: 'inbound.received', detail: { from: 'owner', eventId, messageId: stored.id, kind: msg.kind } });
       return { messageId: stored.id };

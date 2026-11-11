@@ -4,7 +4,7 @@ import { createTestWorld, type TestWorld } from '../helpers/world.js';
 describe('Scheduler', () => {
   let w: TestWorld;
   beforeEach(async () => {
-    w = await createTestWorld();
+    w = await createTestWorld({ modules: [] }); // bare M1 core
   });
   afterEach(async () => w.close());
 

@@ -9,7 +9,7 @@ describe('owner vs stranger classification (I1)', () => {
   let ownerTurns: string[];
 
   beforeEach(async () => {
-    w = await createTestWorld();
+    w = await createTestWorld({ modules: [] }); // bare M1 core
     ownerTurns = [];
     const fallback = w.app.router.hooks.onOwnerMessage;
     w.app.router.hooks.onOwnerMessage = async (ctx) => {

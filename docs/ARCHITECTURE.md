@@ -121,7 +121,7 @@ rows written at the same clock instant (the FakeClock makes that common). Order 
 - `contacts(id, agent_id, transport, address, display_name null, kind 'owner'|'stranger', first_seen_at, last_seen_at, last_canned_reply_at null, unique(agent_id, transport, address))`
 - `contact_notes(id, agent_id, contact_id null, subject null, body, created_at)`
 - `messages(id, agent_id, thread 'owner'|'contact', contact_id null, direction 'in'|'out', body, purpose null, transport_message_id null, reply_to_transport_message_id null, meta jsonb, created_at)`
-- `inbound_events(id, transport, transport_message_id, agent_address, payload jsonb, received_at, processed_at null, progress jsonb default '{}', unique(transport, transport_message_id))` — `progress` maps each routing step already done to its result, so a retried `inbound.process` job resumes instead of redoing side effects.
+- `inbound_events(id, transport, transport_message_id, agent_address, payload jsonb, received_at, processed_at null, progress jsonb default '{}', unique(transport, transport_message_id))`; M2 (002) adds `arrival_seq bigserial` (arrival order at ingest, used by the approval resolver) — `progress` maps each routing step already done to its result, so a retried `inbound.process` job resumes instead of redoing side effects.
 - `jobs(id, type, lane null, payload jsonb, status 'queued'|'running'|'done'|'failed'|'dead', attempts, max_attempts, run_at, locked_at null, last_error null, dedupe_key unique null, created_at, finished_at null)` — `failed` = waiting for a retry at `run_at`; `dead` = out of attempts. A partial unique index on `lane where status = 'running'` makes "one running job per lane" a database rule. `dedupe_key` is unique for the table's lifetime (an idempotency key, not "one active job"). A lane runs in order: a job is claimable only while **no older unfinished job of its lane** exists — `queued` and due, `failed` (waiting for a retry) or `running` — whatever row locks other workers hold (a head job another worker has locked but not yet marked running still holds the lane). A `queued` job scheduled for later takes its place in the lane when it becomes due. **Visibility timeout:** every pump first recovers jobs still `running` after `staleMs` (default 10 min, measured on the `Clock` from `locked_at`): one that used its last attempt becomes `dead` (+ `job.dead`), any other is requeued as `failed`, due now. So a crashed worker or a finish that could not be written never wedges a lane, and handlers run **at least once**. An attempt's outcome is written only if the row still carries that attempt number, so a late finish from a lost worker is a no-op. `job.dead` rows carry `agent_id` when the lane is an agent id. A handler error with `permanent: true` (e.g. `PermanentTransportError`) makes the job `dead` at once; one with `retryAfterMs` is not retried before that delay.
 - `flags(id, agent_id, kind, urgency 'now'|'digest', text, dedupe_key null, status 'pending'|'sent'|'suppressed', created_at, delivered_at null, digest_date null, unique(agent_id, dedupe_key))`
 - `scheduler_state(name, scope, last_run_at, primary key(name, scope))`
@@ -129,8 +129,10 @@ rows written at the same clock instant (the FakeClock makes that common). Order 
 - `schema_migrations(version, applied_at)` — `migrate()` is safe to run from several processes at once (every instance migrates at boot): each script takes a transaction-level advisory lock on the schema and inserts its version row first, so the loser of a race rolls back and skips.
 
 **002_approvals.sql (M2)**
-- `approvals(id, agent_id, ref int, kind, payload jsonb, prompt, status 'pending'|'approved'|'denied'|'expired'|'cancelled'|'executed'|'failed', group_id null, prompt_transport_message_id null, created_at, expires_at, resolved_at null, resolved_by_message_id null, executed_at null, error null, unique(agent_id, ref))`
-- `calendar_writes(id, owner_id, approval_id, event_id, idempotency_key unique, created_at)`
+- `approvals(id, agent_id, ref int, kind, payload jsonb, prompt, status 'pending'|'approved'|'denied'|'expired'|'cancelled'|'executed'|'failed', group_id null, prompt_transport_message_id null, prompt_sending_until null, idempotency_key null, created_at, expires_at, resolved_at null, resolved_by_message_id null, executed_at null, error null, unique(agent_id, ref), unique(agent_id, idempotency_key))` — `prompt_transport_message_id` null = prompt not delivered yet (paused or send failed).
+- `approval_refs(agent_id pk, last_ref)` — per-agent ref counter, bumped by one upsert in the insert transaction.
+- `calendar_writes(id, owner_id, approval_id, event_id, idempotency_key unique, created_at, deleted_at null)` — `deleted_at` set by `CalendarWriter.undo`.
+- `brain_turns(message_id pk, agent_id, status 'running'|'done', outcome null, created_at, finished_at null)` and `brain_tool_memo(message_id, tool, input_hash, occurrence, result, created_at, pk(message_id, tool, input_hash, occurrence))` — Brain turn idempotency (8.2).
 
 **003_google.sql (M3)**
 - `google_accounts(owner_id pk, email null, refresh_token_enc, scopes, connected_at, revoked_at null)` — `email` is null when Gmail read was not granted; `scopes` = space-separated scopes Google actually granted; `refresh_token_enc` = `v1.<iv>.<ciphertext>.<tag>` (AES-256-GCM, owner id as associated data).
@@ -211,12 +213,31 @@ export type LlmBlock =
 export interface LlmMessage { role: 'user' | 'assistant'; content: string | LlmBlock[] }
 export interface LlmTool { name: string; description: string; input_schema: Record<string, unknown> }
 export interface LlmRequest {
-  system: string; messages: LlmMessage[]; tools: LlmTool[]; maxTokens: number;
+  system: string;                    // stable: cached (prompt caching), byte-identical across turns
+  systemDynamic?: string;            // volatile (time, pending items): sent after the cache breakpoint
+  messages: LlmMessage[]; tools: LlmTool[]; maxTokens: number;
   /** Not sent to the API. Used for logging and for scripting tests. */
   meta: { agentId: string; mind: 'brain' | 'envoy'; conversationId?: string };
 }
-export interface LlmResponse { content: LlmBlock[]; stopReason: string; usage?: { inputTokens: number; outputTokens: number } }
+export interface LlmUsage { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+export interface LlmResponse { content: LlmBlock[]; stopReason: string; usage?: LlmUsage }
 export interface LlmClient { complete(req: LlmRequest): Promise<LlmResponse> }
+// src/llm/errors.ts — every client failure is an LlmError { code, retryable }; UnconfiguredLlm
+// (no ANTHROPIC_API_KEY) throws code 'unconfigured', retryable false.
+// src/llm/anthropic.ts — AnthropicLlm: Messages API (beta endpoint, server-side refusal fallback
+// `fallbacks: 'default'`), model per mind (VIOLET_MODEL / VIOLET_ENVOY_MODEL), effort 'medium',
+// thinking left at the model default; cache breakpoints on the last tool and the stable system
+// block, automatic caching for the message prefix. 429/529/5xx/408/409/network → retryable.
+
+// src/llm/tools.ts + toolLoop.ts — shared by Brain and Envoy
+export interface ToolDef<C, I> { name; description; input: ZodType<I>; taints?: boolean; sideEffect?: boolean; handler(input: I, ctx: C): Promise<string> }
+export class ToolRegistry<C> { register(def); get(name); names(); llmTools() }   // registration order = API order
+runToolLoop({ llm, system, systemDynamic?, messages, tools, execute(tool, input, call), onDenied?(call, reason), maxSteps, maxTokens, meta })
+  → { finalText, messages, steps, stopReason: 'end_turn'|'max_tokens'|'refusal'|'max_steps'|…, usage, toolNames }
+// One step = one model call. Every tool_use gets one tool_result (all in one user message).
+// Unknown name / zod-invalid input → is_error result + onDenied ('unknown_tool'|'invalid_input').
+// Handler error → is_error with err.ownerMessage (string) or a generic text — never internals.
+// max_tokens: tools in that response never run. pause_turn: call again. Assistant content verbatim.
 
 // src/google/types.ts
 export interface BusyInterval { start: Date; end: Date }
@@ -279,6 +300,8 @@ export interface App {
   // installed by later modules:
   approvals?: ApprovalService; brain?: Brain; a2a?: A2AService; digest?: DigestService;
 }
+export interface Brain { readonly tools: ToolRegistry<BrainToolCtx>; handle(ctx: OwnerMessageCtx): Promise<void> }
+export interface BrainToolCtx { agent; owner; turn: { messageId: string; ownerText: string; tainted: boolean }; now: Date; callKey: string }
 ```
 
 ### Google (M3)
@@ -369,15 +392,28 @@ Action names written by M1 (I15): `inbound.received`, `inbound.duplicate`, `inbo
 
 System prompt (rules, owner profile, local time, pending approvals, open Envoy questions) + last 40 owner-thread messages + tool loop (≤ 10 steps). Final text → `gateway.sendToOwner(purpose 'reply')`. Tool results containing third-party text are wrapped in `<untrusted source="…">` and mark the turn **tainted**.
 
+- Prompt: `system` = stable text (identity, owner name, rules, untrusted marking, time zone); `systemDynamic` = current local time + pending approval summaries.
+- History: owner-thread rows up to and including the current message (I2: inbound = `user`, everything Violet sent = `assistant`), consecutive same-role rows merged, leading assistant rows dropped; the current message is the last user turn.
+- `wrapUntrusted(source, text)` (`email|calendar|stranger|notes|agent`): NFKC + invisible (Cf) characters removed, any `<` (or bracket look-alike) that starts a tag named `untrusted` inside the content becomes `‹`; the name is matched on a confusable skeleton (default-ignorable and combining marks skipped, case and diacritics folded, Cyrillic/Greek/Armenian/small-capital look-alikes such as `е` U+0435 or `ѕ` U+0455 folded to Latin), with a bounded look-ahead so the pass stays linear. `search_history` taints (Violet's side of the owner thread can quote third parties) and wraps each of Violet's messages as `agent`. Tools with `taints: true` set `ctx.turn.tainted` when they succeed.
+- Idempotent per `messageId`: `brain_turns` marks a finished turn (never re-run, never a second reply). `sideEffect` tools are memoized in `brain_tool_memo` by (message, tool, canonical-JSON input hash, occurrence) and get `ctx.callKey` as idempotency key (approvals use it as `idempotencyKey`; notes derive their id from it). Draft creation has no provider key: a crash between `createDraft` and the memo write can repeat it.
+- Failures: a retryable `LlmError` (or any non-LlmError) fails the job, which retries the turn. Non-retryable → one fixed apology; `unconfigured` → a fixed "model not connected" text. Refusal, step limit and an empty `max_tokens` answer get fixed texts; an empty final text sends nothing.
+- Times in tool inputs: ISO 8601 with explicit offset only; outputs in the owner's zone (`Fri Nov 13, 7:00–8:30 PM [2026-11-13T19:00:00-05:00 → …]`). Range tools take ≤ 31 days.
+- Brain tools get read-only calendar access, no gateway and no transport: no tool sends email, writes the calendar, approves, pauses or messages anyone but the owner (approval prompts are sent by the approval service).
+- Action names (I15): `brain.turn` (outcome, stopReason, steps, tools, tainted, usage), `tool.call` (tool, ok, memoized), `tool.denied` (tool, reason), `gmail.draft_created`, `note.saved`.
+
 Brain tools (M2): `get_schedule`, `find_free_time`, `request_calendar_event`, `search_email`, `read_email`, `draft_email`, `remember`, `recall`, `search_history`, `list_messages_taken`, `list_pending_approvals`.
 Added by M4: `talk_to_agent`, `tell_envoy`, `list_agent_conversations`, `read_agent_conversation`, `send_transcript_to_owner`, `end_agent_conversation`.
 
 ### 8.3 Approvals
 
 - `approvals.request(agentId, { kind, payload, groupId?, expiresAt? })` → the registered kind renders a **one-line** prompt from the payload → sent at once: `#7 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it? Reply yes or no.` (with yes/no buttons where the transport supports them).
-- Resolver (owner interceptor): matches `yes|y|yep|yeah|ok|okay|sure|approve|do it|go ahead|👍` / `no|n|nope|nah|don't|decline|cancel|👎`, optionally followed by `#?<ref>`. Target = explicit ref → else the prompt being replied to → else the only pending approval → else ask "Which one?" with a one-line list. No pending approvals → not handled (falls through to the Brain). Button payloads `approve:<id>` / `deny:<id>` resolve directly.
-- Kinds register `{ render(payload), onApproved, onDenied, onExpired }`. M2: `calendar_event`. M4: `a2a_outcome`, `a2a_release`.
-- Default expiry 24 h. A sweep job marks expired and calls `onExpired`.
+- Resolver (owner interceptor): matches `yes|y|yep|yeah|ok|okay|sure|approve|do it|go ahead|👍` / `no|n|nope|nah|don't|decline|cancel|👎`, optionally followed by `#?<ref>`. Target = explicit ref (only an approval that already existed when the message was written: `created_after_message_seq` < the message's `seq` AND `created_after_arrival_seq` < the arrival seq of the message's inbound event) → else the prompt being replied to → else the only pending approval whose prompt was delivered **before** the message was written (its outbound row's `seq` < the message's `seq` AND `prompt_sent_after_arrival_seq` < the message's event arrival seq; an undelivered prompt, or one sent after the owner wrote — e.g. created by the Brain turn of that very message and found on a hook retry, or by the Brain turn of an earlier message while this one waited in the lane — is never the implicit target). Arrival order is `inbound_events.arrival_seq` (bigserial, added by 002, allocated at ingest); the owner's stored message carries `meta.inboundEventId`; the approval records the sequence's high-water mark (allocated values, so in-flight ingests count as arrived) at creation and at markSent → else ask "Which one?" with a one-line list of those. A reply-to that names no prompt of this agent never picks the implicit target: "Which one?" if any are answerable. No answerable approvals → not handled (falls through to the Brain). Button payloads `approve:<id>` / `deny:<id>` resolve directly.
+- Kinds register `{ schema, render(payload, { timezone }), onApproved?, onDenied?, onExpired?, calendarEvents?(payload), guard?(approval) }` (`src/approvals/types.ts`). M2: `calendar_event`. M4: `a2a_outcome`, `a2a_release`.
+- `request(agentId, { kind, payload, groupId?, expiresAt?, idempotencyKey? })` validates with the kind's schema, stores the parsed payload, allocates the ref, and composes the prompt **by code**: `#<ref> <render(...)> Reply yes or no.` — the rendered part is sanitized (control characters and line breaks stripped), NFKC-normalized, every number sign (`#`, `＃`, `﹟`) removed, capped at 240 chars. A kind may cap the expiry with `latestExpiry(payload)` (`calendar_event`: the event's start). Buttons: `approve:<id>` / `deny:<id>`. Paused → stored unsent; `onResume` and the sweep send unsent pending prompts (after expiring what lapsed, so a stale prompt is never sent). Every send first takes an atomic claim (`prompt_sending_until`, 2 min lease), so concurrent senders deliver a prompt once. The same `idempotencyKey` returns the existing approval.
+- Resolution: one `UPDATE … WHERE status = 'pending' AND expires_at > now` setting `resolved_by_message_id`; a retried hook finds its own resolution by that id and re-runs the (idempotent) callbacks. `onApproved` / `onDenied` return the one-line reply (defaults: `Okay, approved #n.` / `Okay, not doing #n.`). Not open → `#n isn't open any more.`; ambiguous → `Which one? #1 … · #2 … — reply yes 1 or no 1.` A button for an approval of another agent resolves nothing. Before targeting, the resolver expires pending approvals past `expires_at` (the sweep does not run while paused), so a late yes gets the not-open text; `listPending` likewise omits them, and `executeApproved` refuses an approval resolved after its expiry.
+- `cancel(id, reason)`, `get`, `listPending`, `expireDue`, `sendUnsent`; `approvals.calendar` is the `CalendarWriter`: `executeApproved(id)` (requires `approved`, runs `guard`, books `calendarEvents(stored payload)` with keys `approval:<id>:<n>`, records `calendar_writes`, marks `executed`; an event that has already started is refused (`failed`, "the event has already started"); a failure undoes what it wrote and marks `failed` with a safe reason; anything not `approved` throws `CalendarWriteRefused`) and `undo(id)`.
+- Default expiry 24 h. The per-agent `approvals.sweep` (every minute) marks expired, calls `onExpired`, raises a `digest` flag, and sends unsent prompts.
+- Action names (I15): `approval.requested`, `approval.approved`, `approval.denied`, `approval.ambiguous`, `approval.not_open`, `approval.cancelled`, `approval.expired`, `approval.executed`, `approval.failed`, `calendar.event_created`, `calendar.event_deleted`, `calendar.write_refused`.
 
 ### 8.4 Agent-to-agent (open conversation)
 

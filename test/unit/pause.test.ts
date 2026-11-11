@@ -7,7 +7,7 @@ describe('pause / resume (I14)', () => {
   let hookCalls: string[];
 
   beforeEach(async () => {
-    w = await createTestWorld();
+    w = await createTestWorld({ modules: [] }); // bare M1 core
     hookCalls = [];
     w.app.router.hooks.onPause.push(async (id) => void hookCalls.push(`pause:${id}`));
     w.app.router.hooks.onResume.push(async (id) => void hookCalls.push(`resume:${id}`));

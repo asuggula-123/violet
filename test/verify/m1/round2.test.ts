@@ -11,7 +11,7 @@ import { createTestWorld, type TestWorld } from '../../helpers/world.js';
 describe('verify M1 round 2', () => {
   let w: TestWorld;
   beforeEach(async () => {
-    w = await createTestWorld({ jobs: { backoffMs: () => 1_000, maxAttempts: 3 } });
+    w = await createTestWorld({ modules: [], jobs: { backoffMs: () => 1_000, maxAttempts: 3 } }); // bare M1 core
   });
   afterEach(async () => w.close());
 
