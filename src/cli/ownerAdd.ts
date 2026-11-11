@@ -6,12 +6,13 @@ import { createRepos } from '../core/repos/index.js';
 import { createHousehold, createOwnerWithAgent, type SetupCtx } from '../core/setup.js';
 import { migrate } from '../db/migrate.js';
 import { openDb } from '../db/open.js';
+import { checkTelegramCliArgs, telegramPairingInstructions } from '../transport/telegram/pairing.js';
 import type { TransportName } from '../transport/types.js';
 
 // With embedded PGlite (no DATABASE_URL), stop the server first: one process per data dir.
 const USAGE =
   'Usage: npm run owner:add -- --household <name or id> --name <owner name> --tz <IANA zone> ' +
-  '--transport <fake|telegram> --agent-address <address> [--owner-address <address>]';
+  '--transport <fake|telegram> --agent-address <address> [--owner-address <address>] [--bot-username <telegram bot username>]';
 
 const { values } = parseArgs({
   options: {
@@ -21,6 +22,7 @@ const { values } = parseArgs({
     transport: { type: 'string' },
     'agent-address': { type: 'string' },
     'owner-address': { type: 'string' },
+    'bot-username': { type: 'string' },
   },
 });
 
@@ -32,6 +34,14 @@ if (!household || !name || !tz || !transport || !agentAddress) {
 }
 if (transport !== 'fake' && transport !== 'telegram') {
   console.error(`--transport must be fake or telegram\n${USAGE}`);
+  process.exit(2);
+}
+
+let telegramArgs: { botUsername?: string } = {};
+try {
+  if (transport === 'telegram') telegramArgs = checkTelegramCliArgs(agentAddress, values['bot-username']);
+} catch (err) {
+  console.error(`${err instanceof Error ? err.message : String(err)}\n${USAGE}`);
   process.exit(2);
 }
 
@@ -60,6 +70,7 @@ try {
   if (created.pairingCode) {
     console.log(`\nPairing code (shown once, expires ${created.agent.pairing_expires_at?.toISOString()}):`);
     console.log(`  /start ${created.pairingCode}`);
+    if (transport === 'telegram') console.log(`\n${telegramPairingInstructions(created.pairingCode, telegramArgs.botUsername).join('\n')}`);
   } else {
     console.log('Owner address preset; no pairing needed.');
   }

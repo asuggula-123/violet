@@ -1,6 +1,6 @@
 /** Verifier (M1): migration runner safety. */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { migrate } from '../../../src/db/migrate.js';
+import { loadMigrations, migrate } from '../../../src/db/migrate.js';
 import { PgDb, type Db } from '../../../src/db/db.js';
 import { openTestDb } from '../../helpers/world.js';
 
@@ -25,8 +25,8 @@ describe('verify M1: migrations', () => {
     try {
       const results = await Promise.allSettled([migrate(db), migrate(second)]);
       expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
-      const versions = await db.query<{ version: string }>('SELECT version FROM schema_migrations');
-      expect(versions.rows).toEqual([{ version: '001' }]);
+      const versions = await db.query<{ version: string }>('SELECT version FROM schema_migrations ORDER BY version');
+      expect(versions.rows).toEqual(loadMigrations().map((m) => ({ version: m.version })));
     } finally {
       await closeSecond();
     }
@@ -36,7 +36,7 @@ describe('verify M1: migrations', () => {
     await migrate(db);
     const other = await openTestDb();
     try {
-      expect(await migrate(other.db)).toEqual(['001_core.sql']);
+      expect(await migrate(other.db)).toEqual(loadMigrations().map((m) => m.name));
       await other.db.query(`INSERT INTO households (id, name, created_at) VALUES ('h1', 'x', now())`);
       const mine = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM households');
       expect(mine.rows[0]!.n).toBe(0);

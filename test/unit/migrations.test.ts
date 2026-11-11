@@ -31,19 +31,24 @@ describe('migrations', () => {
   afterEach(async () => cleanup());
 
   it('apply on a fresh database and are idempotent', async () => {
-    expect(await migrate(db)).toEqual(['001_core.sql']);
+    // Later milestones add their own files (002_…, 003_…): all apply, in order.
+    const all = loadMigrations().map((m) => m.name);
+    expect(all[0]).toBe('001_core.sql');
+    expect(await migrate(db)).toEqual(all);
     expect(await migrate(db)).toEqual([]);
     const res = await db.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY table_name`,
     );
-    expect(res.rows.map((r) => r.table_name)).toEqual(CORE_TABLES);
-    const versions = await db.query<{ version: string }>('SELECT version FROM schema_migrations');
-    expect(versions.rows).toEqual([{ version: '001' }]);
+    expect(res.rows.map((r) => r.table_name)).toEqual(expect.arrayContaining(CORE_TABLES));
+    const versions = await db.query<{ version: string }>('SELECT version FROM schema_migrations ORDER BY version');
+    expect(versions.rows).toEqual(loadMigrations().map((m) => ({ version: m.version })));
   });
 
   it('finds the migrations directory and orders files by version', () => {
     expect(migrationsDir()).toMatch(/migrations$/);
-    expect(loadMigrations().map((m) => m.version)).toEqual(['001']);
+    const versions = loadMigrations().map((m) => m.version);
+    expect(versions[0]).toBe('001');
+    expect(versions).toEqual([...versions].sort());
   });
 
   it('rolls back a failing migration completely', async () => {

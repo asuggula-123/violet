@@ -4,6 +4,8 @@ import { z } from 'zod';
 import type { App } from './app.js';
 import { devEndpointsEnabled } from './config.js';
 import { FakeTransport } from './transport/fake.js';
+import { registerGoogleRoutes } from './google/routes.js';
+import { registerTelegramRoutes } from './transport/telegram/routes.js';
 
 const devInbound = z.object({
   agentAddress: z.string().min(1),
@@ -34,6 +36,9 @@ export function buildServer(app: App): FastifyInstance {
       return reply.code(503).send({ ok: false });
     }
   });
+
+  registerGoogleRoutes(server, app);
+  registerTelegramRoutes(server, app);
 
   const transport = app.deps.transport;
   const adminToken = app.deps.config.ADMIN_TOKEN;

@@ -1,5 +1,5 @@
 import type { Logger } from 'pino';
-import type { OutboundButton, OutboundPurpose, Transport } from '../transport/types.js';
+import { TransportError, type OutboundButton, type OutboundPurpose, type Transport } from '../transport/types.js';
 import type { ActionLog } from './actionLog.js';
 import { cannedText, type CannedKey } from './canned.js';
 import type { Repos } from './repos/index.js';
@@ -87,10 +87,18 @@ export function createOutbound(deps: Deps): { gateway: OutboundGateway; control:
     return { messageId: row.id, transportMessageId: sent.transportMessageId };
   }
 
+  /**
+   * The error is rethrown by the caller: a permanent TransportError makes the job dead
+   * at once (no retry storm), a retryable one keeps the job's retries (see jobs.ts).
+   */
   async function logFailure(agentId: string, purpose: OutboundPurpose, err: unknown, extra: Record<string, unknown> = {}): Promise<void> {
     const error = err instanceof Error ? err.message : String(err);
-    log.warn({ agentId, purpose, err: error }, 'outbound send failed');
-    await actionLog.write({ agentId, actor: 'system', action: 'outbound.failed', detail: { purpose, error, ...extra } });
+    const cause =
+      err instanceof TransportError
+        ? { permanent: err.permanent, reason: err.reason, ...(err.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}) }
+        : {};
+    log.warn({ agentId, purpose, err: error, ...cause }, 'outbound send failed');
+    await actionLog.write({ agentId, actor: 'system', action: 'outbound.failed', detail: { purpose, error, ...cause, ...extra } });
   }
 
   async function loadAgent(agentId: string): Promise<AgentRow> {

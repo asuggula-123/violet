@@ -26,6 +26,8 @@ const configSchema = z
     GOOGLE_REDIRECT_URI: optionalString,
     /** 32 bytes, base64. Encrypts Google refresh tokens at rest (I16). */
     TOKEN_ENC_KEY: optionalString,
+    /** Space-separated OAuth scopes to request; unset → src/google/scopes.ts defaults. */
+    GOOGLE_SCOPES: optionalString,
   })
   .transform((c) => {
     const model = c.VIOLET_MODEL ?? 'claude-opus-5-5';

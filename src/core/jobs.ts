@@ -3,6 +3,7 @@ import type { Logger } from 'pino';
 import { addMs, type Clock } from '../clock.js';
 import { pgErrorCode, type Db, type Queryable } from '../db/db.js';
 import type { ActionLog } from './actionLog.js';
+import { runInJob } from './jobContext.js';
 
 /**
  * DB-backed queue; one running job per lane (lane = agent id). Jobs of a lane run
@@ -11,6 +12,10 @@ import type { ActionLog } from './actionLog.js';
  * other workers hold. A job left `running` by a lost worker or a failed finish is
  * recovered after `staleMs` (a visibility timeout on the Clock), so handlers run
  * at least once.
+ *
+ * A handler error carrying `permanent: true` (e.g. PermanentTransportError) makes the
+ * job dead at once: retrying cannot help. One carrying `retryAfterMs` is not retried
+ * before that delay.
  */
 export interface JobQueue {
   register(type: string, handler: (payload: any) => Promise<void>): void;
@@ -45,6 +50,12 @@ export interface JobQueueOptions {
 export const DEFAULT_MAX_ATTEMPTS = 5;
 export const DEFAULT_STALE_MS = 600_000;
 
+function retryHint(err: unknown): { permanent: boolean; retryAfterMs: number } {
+  const e = (typeof err === 'object' && err !== null ? err : {}) as { permanent?: unknown; retryAfterMs?: unknown };
+  const after = typeof e.retryAfterMs === 'number' && Number.isFinite(e.retryAfterMs) ? e.retryAfterMs : 0;
+  return { permanent: e.permanent === true, retryAfterMs: Math.max(0, after) };
+}
+
 export function defaultBackoffMs(attempt: number): number {
   return Math.min(5_000 * 2 ** (attempt - 1), 3_600_000);
 }
@@ -78,13 +89,18 @@ export function createJobQueue(
     return res.rows[0]?.id ?? null;
   }
 
-  async function logDead(q: Queryable, job: { id: string; type: string; lane: string | null; attempts: number }, error: string) {
+  async function logDead(
+    q: Queryable,
+    job: { id: string; type: string; lane: string | null; attempts: number },
+    error: string,
+    extra: Record<string, unknown> = {},
+  ) {
     await actionLog.write(
       {
         actor: 'job',
         action: 'job.dead',
         agentId: await laneAgentId(q, job.lane),
-        detail: { jobId: job.id, type: job.type, lane: job.lane, attempts: job.attempts, error },
+        detail: { jobId: job.id, type: job.type, lane: job.lane, attempts: job.attempts, error, ...extra },
       },
       q,
     );
@@ -167,20 +183,21 @@ export function createJobQueue(
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
-    if (job.attempts >= job.max_attempts) {
+    const hint = retryHint(err);
+    if (hint.permanent || job.attempts >= job.max_attempts) {
       await db.tx(async (tx) => {
         const res = await tx.query(
           `UPDATE jobs SET status = 'dead', last_error = $2, finished_at = $3, locked_at = NULL WHERE ${mine}`,
           [job.id, message, now],
         );
-        if (res.rowCount > 0) await logDead(tx, job, message);
+        if (res.rowCount > 0) await logDead(tx, job, message, { permanent: hint.permanent });
       });
       return;
     }
     await db.query(`UPDATE jobs SET status = 'failed', last_error = $2, run_at = $3, locked_at = NULL WHERE ${mine}`, [
       job.id,
       message,
-      addMs(now, backoff(job.attempts)),
+      addMs(now, Math.max(backoff(job.attempts), hint.retryAfterMs)),
     ]);
     log.warn({ jobId: job.id, type: job.type, attempt: job.attempts, err: message }, 'job failed, will retry');
   }
@@ -206,7 +223,7 @@ export function createJobQueue(
     }
     let outcome: unknown;
     try {
-      await handler(job.payload);
+      await runInJob(job.id, () => handler(job.payload));
     } catch (err) {
       outcome = err ?? new Error('job failed');
     }

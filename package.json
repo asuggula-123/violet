@@ -14,7 +14,8 @@
     "migrate": "tsx src/cli/migrate.ts",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
-    "owner:add": "tsx src/cli/ownerAdd.ts"
+    "owner:add": "tsx src/cli/ownerAdd.ts",
+    "google:link": "tsx src/cli/googleLink.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.16",

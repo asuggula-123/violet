@@ -1,6 +1,6 @@
 import type { Clock } from '../clock.js';
 import type { Db } from '../db/db.js';
-import type { InboundMessage } from '../transport/types.js';
+import { TransportError, type InboundMessage } from '../transport/types.js';
 import type { ActionEntry, ActionLog } from './actionLog.js';
 import { OWNER_TEXT } from './canned.js';
 import type { FlagService } from './flags.js';
@@ -188,8 +188,16 @@ export function createRouter(deps: Deps): Router {
         ? OWNER_TEXT.alreadyPaused
         : OWNER_TEXT.notPaused;
     await steps.once('pause.ack', async () => {
-      await control.sendPauseAck(agent.id, text);
-      return true;
+      try {
+        await control.sendPauseAck(agent.id, text);
+        return true;
+      } catch (err) {
+        // A permanent failure (the owner blocked the bot) is already logged as
+        // outbound.failed and cannot be fixed by retrying; the state change stands, so
+        // the pause/resume hooks must still run.
+        if (err instanceof TransportError && err.permanent) return false;
+        throw err;
+      }
     });
     if (!changed) return;
     await steps.once('pause.hooks', async () => {

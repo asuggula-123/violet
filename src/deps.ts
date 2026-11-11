@@ -1,11 +1,13 @@
 import pino, { type Logger } from 'pino';
-import { SystemClock } from './clock.js';
+import { SystemClock, type Clock } from './clock.js';
 import type { AppDeps } from './app.js';
 import type { Config } from './config.js';
 import type { Db } from './db/db.js';
 import { FakeCalendar, FakeGmail } from './google/fake.js';
+import { createGoogle, googleConfigured } from './google/services.js';
 import { ScriptedLlm } from './llm/scripted.js';
 import { FakeTransport } from './transport/fake.js';
+import { telegramTransportFromConfig } from './transport/telegram/transport.js';
 import type { Transport } from './transport/types.js';
 
 export function createLogger(config: Config): Logger {
@@ -15,24 +17,27 @@ export function createLogger(config: Config): Logger {
   });
 }
 
-function createTransport(config: Config): Transport {
+function createTransport(config: Config, clock: Clock): Transport {
   if (config.TRANSPORT === 'fake') return new FakeTransport();
-  throw new Error('TRANSPORT=telegram requires the Telegram transport (milestone 6), which is not installed in this build');
+  return telegramTransportFromConfig(config, clock);
 }
 
 /**
- * Production wiring of providers. Until the Anthropic client (M2) and the Google
- * providers (M3) exist, the in-memory doubles stand in; M1 never calls them.
+ * Production wiring of providers. Until the Anthropic client (M2) exists, the
+ * in-memory double stands in. Google is real once configured (M3), else fakes.
  */
 export function createDeps(config: Config, db: Db): AppDeps {
+  const clock = new SystemClock();
+  const log = createLogger(config);
+  const google = googleConfigured(config) ? createGoogle({ config, db, clock, log }) : null;
   return {
     db,
-    clock: new SystemClock(),
-    transport: createTransport(config),
+    clock,
+    transport: createTransport(config, clock),
     llm: new ScriptedLlm(),
-    calendar: new FakeCalendar(),
-    gmail: new FakeGmail(),
+    calendar: google?.calendar ?? new FakeCalendar(),
+    gmail: google?.gmail ?? new FakeGmail(),
     config,
-    log: createLogger(config),
+    log,
   };
 }

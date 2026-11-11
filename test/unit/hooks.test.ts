@@ -43,7 +43,8 @@ describe('modules and router hooks', () => {
 });
 
 describe('defaultModules', () => {
-  it('M1 ships no default modules', () => {
-    expect(defaultModules).toEqual([]);
+  it('default modules have unique names (M1 ships none; each milestone adds one line)', () => {
+    const names = defaultModules.map((m) => m.name);
+    expect(new Set(names).size).toBe(names.length);
   });
 });

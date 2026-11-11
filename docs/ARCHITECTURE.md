@@ -75,7 +75,7 @@ the same commit.
 - **Db adapter**: one interface, two drivers. `PgDb` (node-postgres) for real Postgres. `PgliteDb` (Postgres compiled to WASM, in-process) for zero-setup tests, the demo, and local dev when `DATABASE_URL` is unset. Driver differences are hidden in the adapter: never read `bigint` columns raw (cast `::int` / `::text` in SQL), always `count(*)::int`.
 - IDs: `crypto.randomUUID()` stored as `text`. Times: `timestamptz`. No `Date.now()` in app code — everything takes a `Clock`.
 - Tests: `vitest`. Default driver PGlite in-memory. If `TEST_DATABASE_URL` is set, each test world creates and drops its own schema in real Postgres. Both must pass.
-- Scripts: `npm run build` (tsc to `dist/`, copies the `.sql` migrations), `npm run typecheck`, `npm test`, `npm run test:pg`, `npm run migrate`, `npm run dev`, `npm run demo`, `npm run owner:add`.
+- Scripts: `npm run build` (tsc to `dist/`, copies the `.sql` migrations), `npm run typecheck`, `npm test`, `npm run test:pg`, `npm run migrate`, `npm run dev`, `npm run demo`, `npm run owner:add`, `npm run google:link`.
 - Test personas are **Alex** and **Sam**. No real names, numbers, emails or keys anywhere in the repo.
 - `.gitignore`: `node_modules`, `dist`, `.env*` (except `.env.example`), `.data`, `.worktrees`.
 
@@ -90,17 +90,18 @@ src/
   modules.ts           defaultModules list (one line per milestone)
   server.ts            Fastify: /healthz, webhooks, oauth, dev endpoints
   db/                  db.ts (Db, PgDb, PgliteDb), open.ts, migrate.ts, migrations/*.sql
-  core/                types.ts, repos/*, router.ts, outbound.ts, jobs.ts,
+  core/                types.ts, repos/*, router.ts, outbound.ts, jobs.ts, jobContext.ts,
                        scheduler.ts, actionLog.ts, flags.ts, setup.ts, pairing.ts, canned.ts, sanitize.ts,
                        later.ts (placeholder interfaces for services later milestones install)
   transport/           types.ts, fake.ts, telegram/*
   llm/                 types.ts (LlmClient), anthropic.ts, scripted.ts, toolLoop.ts
   brain/               brain.ts, prompt.ts, tools/*, untrusted.ts
   approvals/           service.ts, resolver.ts, calendarWriter.ts
-  google/              types.ts, fake.ts, oauth.ts, http.ts, calendar.ts, gmail.ts, tokens.ts
+  google/              types.ts, fake.ts, oauth.ts, routes.ts, http.ts, allowlist.ts, errors.ts, api.ts, services.ts,
+                       calendar.ts, gmail.ts, mime.ts, draft.ts, time.ts, tokens.ts, crypto.ts, scopes.ts
   a2a/                 types.ts, service.ts, envoy.ts, envoyTools.ts, egress.ts, outcome.ts, render.ts
   flags/               digest.ts, conflicts.ts, budget.ts
-  cli/                 migrate.ts, ownerAdd.ts, demo.ts, chat.ts
+  cli/                 migrate.ts, ownerAdd.ts, googleLink.ts, demo.ts, chat.ts
 test/
   helpers/world.ts     createTestWorld()
   unit/ … e2e/         e2e/simulation.test.ts, e2e/privacy.test.ts, e2e/injection.test.ts
@@ -121,7 +122,7 @@ rows written at the same clock instant (the FakeClock makes that common). Order 
 - `contact_notes(id, agent_id, contact_id null, subject null, body, created_at)`
 - `messages(id, agent_id, thread 'owner'|'contact', contact_id null, direction 'in'|'out', body, purpose null, transport_message_id null, reply_to_transport_message_id null, meta jsonb, created_at)`
 - `inbound_events(id, transport, transport_message_id, agent_address, payload jsonb, received_at, processed_at null, progress jsonb default '{}', unique(transport, transport_message_id))` — `progress` maps each routing step already done to its result, so a retried `inbound.process` job resumes instead of redoing side effects.
-- `jobs(id, type, lane null, payload jsonb, status 'queued'|'running'|'done'|'failed'|'dead', attempts, max_attempts, run_at, locked_at null, last_error null, dedupe_key unique null, created_at, finished_at null)` — `failed` = waiting for a retry at `run_at`; `dead` = out of attempts. A partial unique index on `lane where status = 'running'` makes "one running job per lane" a database rule. `dedupe_key` is unique for the table's lifetime (an idempotency key, not "one active job"). A lane runs in order: a job is claimable only while **no older unfinished job of its lane** exists — `queued` and due, `failed` (waiting for a retry) or `running` — whatever row locks other workers hold (a head job another worker has locked but not yet marked running still holds the lane). A `queued` job scheduled for later takes its place in the lane when it becomes due. **Visibility timeout:** every pump first recovers jobs still `running` after `staleMs` (default 10 min, measured on the `Clock` from `locked_at`): one that used its last attempt becomes `dead` (+ `job.dead`), any other is requeued as `failed`, due now. So a crashed worker or a finish that could not be written never wedges a lane, and handlers run **at least once**. An attempt's outcome is written only if the row still carries that attempt number, so a late finish from a lost worker is a no-op. `job.dead` rows carry `agent_id` when the lane is an agent id.
+- `jobs(id, type, lane null, payload jsonb, status 'queued'|'running'|'done'|'failed'|'dead', attempts, max_attempts, run_at, locked_at null, last_error null, dedupe_key unique null, created_at, finished_at null)` — `failed` = waiting for a retry at `run_at`; `dead` = out of attempts. A partial unique index on `lane where status = 'running'` makes "one running job per lane" a database rule. `dedupe_key` is unique for the table's lifetime (an idempotency key, not "one active job"). A lane runs in order: a job is claimable only while **no older unfinished job of its lane** exists — `queued` and due, `failed` (waiting for a retry) or `running` — whatever row locks other workers hold (a head job another worker has locked but not yet marked running still holds the lane). A `queued` job scheduled for later takes its place in the lane when it becomes due. **Visibility timeout:** every pump first recovers jobs still `running` after `staleMs` (default 10 min, measured on the `Clock` from `locked_at`): one that used its last attempt becomes `dead` (+ `job.dead`), any other is requeued as `failed`, due now. So a crashed worker or a finish that could not be written never wedges a lane, and handlers run **at least once**. An attempt's outcome is written only if the row still carries that attempt number, so a late finish from a lost worker is a no-op. `job.dead` rows carry `agent_id` when the lane is an agent id. A handler error with `permanent: true` (e.g. `PermanentTransportError`) makes the job `dead` at once; one with `retryAfterMs` is not retried before that delay.
 - `flags(id, agent_id, kind, urgency 'now'|'digest', text, dedupe_key null, status 'pending'|'sent'|'suppressed', created_at, delivered_at null, digest_date null, unique(agent_id, dedupe_key))`
 - `scheduler_state(name, scope, last_run_at, primary key(name, scope))`
 - `action_log(id bigserial, at, agent_id null, actor, action, detail jsonb)` + append-only trigger
@@ -131,7 +132,9 @@ rows written at the same clock instant (the FakeClock makes that common). Order 
 - `approvals(id, agent_id, ref int, kind, payload jsonb, prompt, status 'pending'|'approved'|'denied'|'expired'|'cancelled'|'executed'|'failed', group_id null, prompt_transport_message_id null, created_at, expires_at, resolved_at null, resolved_by_message_id null, executed_at null, error null, unique(agent_id, ref))`
 - `calendar_writes(id, owner_id, approval_id, event_id, idempotency_key unique, created_at)`
 
-**003_google.sql (M3)** — `google_accounts(owner_id pk, email, refresh_token_enc, scopes, connected_at, revoked_at null)`, `oauth_states(state pk, owner_id, created_at, expires_at)`
+**003_google.sql (M3)**
+- `google_accounts(owner_id pk, email null, refresh_token_enc, scopes, connected_at, revoked_at null)` — `email` is null when Gmail read was not granted; `scopes` = space-separated scopes Google actually granted; `refresh_token_enc` = `v1.<iv>.<ciphertext>.<tag>` (AES-256-GCM, owner id as associated data).
+- `oauth_states(state pk, owner_id, created_at, expires_at, used_at null)` — `state` holds the sha256 hex of the state value (never the value); `used_at` makes it single use (consumed by one atomic `UPDATE … RETURNING`).
 
 **004_a2a.sql (M4)**
 - `a2a_conversations(id, initiator_agent_id, responder_agent_id, topic, status, window_start null, window_end null, created_at, updated_at, closed_at null, close_reason null)`
@@ -187,6 +190,8 @@ export interface Transport {
   readonly name: TransportName;
   send(msg: OutboundMessage): Promise<{ transportMessageId: string }>;
 }
+// send() failures: TransportError { permanent, reason, retryAfterMs? }, subclassed as
+// PermanentTransportError (retrying cannot help) and RetryableTransportError.
 
 // src/core/outbound.ts
 export interface OutboundGateway {
@@ -245,6 +250,8 @@ export interface JobQueue {
   pump(): Promise<number>;           // recover stale running jobs, then run all runnable ones; returns how many ran
   start(): void; stop(): Promise<void>;
 }
+// Each handler runs inside runInJob(job.id, …) (src/core/jobContext.ts); currentJobId()
+// tells code below it which job (and so which retry) it belongs to.
 
 // src/core/scheduler.ts
 export interface Scheduler {
@@ -273,6 +280,16 @@ export interface App {
   approvals?: ApprovalService; brain?: Brain; a2a?: A2AService; digest?: DigestService;
 }
 ```
+
+### Google (M3)
+
+- `src/google/http.ts` is the only code that calls Google. The allow-list (`allowlist.ts`, I8) is checked on the parsed URL before `fetch`: exact host, exact path segments (raw path must be in normal form: no `%`, `\`, dot or empty segments), ids `[A-Za-z0-9_-]`, and a per-route list of query keys (`sendUpdates` is pinned to `none`, every value). Providers `encodeURIComponent` ids in paths, so a hostile id is denied by the allow-list rather than reshaping the URL. Allowed: `POST oauth2…/token`, `POST calendar/v3/freeBusy`, `GET|POST calendar/v3/calendars/primary/events`, `DELETE …/events/{id}`, `GET gmail/v1/users/me/{profile, messages, messages/{id}, threads/{id}}`, `POST …/me/drafts`. A denied call throws `GoogleDeniedError` and writes `google.denied` (best effort, never masking the denial; control characters and lone surrogates in the logged URL are escaped so jsonb accepts it). No retries in the client (the job queue retries); one bounded re-try after a 401 with a fresh token.
+- Typed errors (`errors.ts`), each with a short owner-safe `safeMessage`: `GoogleDeniedError`, `GoogleNotConnectedError`, `GoogleAuthError` (401, `invalid_grant`, revoked), `GoogleScopeMissingError` (with `capability`), `GoogleNotFoundError`, `GoogleConflictError`, `GoogleRateLimitedError` (`retryAfterSec`), `GoogleTransientError`, `GoogleInvalidInputError`, `GoogleRequestError`. `retryable` is true for rate-limited and transient.
+- Capabilities come from the **granted** scopes: `calendarFreeBusy`, `calendarRead`, `calendarWrite`, `gmailRead`, `gmailDraft`. A call without its capability throws `GoogleScopeMissingError` before any network call. Default scopes: `calendar.freebusy`, `calendar.events.owned`, `gmail.readonly`, `gmail.drafts.create` (`GOOGLE_SCOPES` overrides).
+- `invalid_grant` on refresh → `revoked_at` set, `google.revoked` logged, one `now` flag `Google access expired — reconnect needed.` (dedupe key per connection), `GoogleAuthError`. A refresh token that fails to decrypt (wrong/rotated `TOKEN_ENC_KEY`, corrupt row) → `GoogleAuthError` reason `undecryptable`, one `now` flag of kind `google.undecryptable` (same text, dedupe per connection), the account is **not** marked revoked (restoring the key recovers it). `googleModule` (in `defaultModules`) binds `app.flags` for this.
+- Connect: `oauth.createConnectLink(ownerId)` (CLI `npm run google:link -- --owner <id>`) → `GET /oauth/google/start?state=…` → Google consent → `GET /oauth/google/callback` → `google.connected` (or `google.connect_failed {reason}`). Routes exist only when Google is configured. `createDeps` uses the real providers when `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` and `TOKEN_ENC_KEY` are all set, else the fakes; `googleOf(deps)` returns the services behind real providers.
+- Calendar: `createEvent` uses event id = lowercase base32hex(sha256(idempotencyKey)) and `sendUpdates=none`; HTTP 409 returns the same id. `deleteEvent` treats 404/410 as done. `listEvents` skips cancelled events and reads at most 20 pages of 250; more pages left at that point is a `GoogleRequestError`, never a partial list; all-day dates start at the first instant of that date in the calendar's zone (midnight, or the DST transition where midnight is skipped; end exclusive), `allDay: true`. Floating wall times inside a DST gap resolve forward (pre-transition offset), overlaps take the earlier instant.
+- Gmail: `search` caps at 25 messages; bodies prefer `text/plain`, fall back to stripped HTML, capped at 20,000 chars. Sender-controlled input is bounded: each part's base64 is cut before decoding, the MIME tree is walked iteratively (depth ≤ 50, ≤ 500 parts, the rest ignored), HTML is cut at 80,000 chars and stripped in one linear scan (no backtracking regex; an unclosed tag, comment or script runs to the end and is dropped). Drafts are hand-built RFC 2822 (base64 UTF-8 body, RFC 2047 subject); recipients must be bare addresses within RFC 5321 limits (address ≤ 254, domain ≤ 253 chars) and the subject has no control characters (`GoogleInvalidInputError`). Replies set `threadId`, `In-Reply-To`, `References` (the first id plus the last 10). `To` and `References` are folded (CRLF + space) so no line exceeds ~78 chars (RFC 5322 limit 998). No send anywhere; a test scans `src/` for send endpoints.
 
 ### Router hooks (M1 defines, later milestones fill)
 
@@ -317,6 +334,17 @@ await w.close();
 needs `Authorization: Bearer <ADMIN_TOKEN>` (constant-time compare); otherwise 401.
 Without `ADMIN_TOKEN` the routes are not registered (I1).
 
+### Telegram transport (M6)
+
+- One bot per agent. `agent_address` = bot id (the digits before `:` in the token); owner address = Telegram user id. Tokens come from `TELEGRAM_BOT_TOKENS` (comma-separated, format-checked, no duplicates).
+- Ids: inbound `transportMessageId` = `<bot id>:<update id>` (I18). Outbound ids and `replyToTransportMessageId` (a reply, or the message carrying a pressed button) = `<chat id>:<message id>`.
+- Inbound: private chats only. Text → `text`; other messages → `unsupported`, and so is text the sender did not type (a forward: `forward_origin`/`forward_from`/`forward_from_chat`/`forward_sender_name`/`forward_date`, or `via_bot` output), so it never reads as the owner's words (principle 3, I5); `callback_query` → `button` (`buttonPayload` = callback data, `text` '', sender = the presser). Edits, channel posts, bot senders, other updates → ignored. Group/supergroup/channel → ignored and the bot leaves the chat. Untrusted strings (text, names, callback data) drop U+0000 and replace lone surrogates with U+FFFD, which Postgres `jsonb` rejects, so no update is unstorable (a webhook 500 on every redelivery, a stuck poll offset). Every ignored update is logged as `inbound.dropped` (`transport`, `botId`, `updateId`, `reason`) and a left chat as `telegram.chat_left` (I15).
+- Outbound: plain text (no `parse_mode`), link previews off, split at 4096 UTF-16 units on paragraph/line/space boundaries; buttons = one inline-keyboard row on the last chunk, `callback_data` = button id (≤ 64 bytes, else a permanent error). A retryable failure after some chunks went out is remembered in process (6 h on the app `Clock`), keyed by the running job's id (`core/jobContext.ts`: the job queue runs each handler inside `runInJob(job.id, …)`) and the message, so only that job's retry resumes with the first undelivered chunk; a new job, or a send outside any job, always sends the whole message.
+- Errors: 400/401/403/404 → permanent; 429 (with `retry_after` → `retryAfterMs`), 5xx, network → retryable. The token is in the request URL, so errors are built from the method name and Telegram's `error_code`/`description` only; URLs and fetch errors are never logged.
+- Webhook mode: `POST /webhooks/telegram/:botId`, `X-Telegram-Bot-Api-Secret-Token` checked against `TELEGRAM_WEBHOOK_SECRET` (constant time) before the body is parsed → 401; unknown bot → 404; malformed body → 400; else ingest → 200. Error bodies are `{"ok":false}`. At boot, with `PUBLIC_BASE_URL`, `setWebhook` per bot (secret token, `allowed_updates` = message, callback_query).
+- Polling mode (`TELEGRAM_MODE=polling`, local dev): per bot, `deleteWebhook` once, then long-poll `getUpdates`; the offset (`telegram_state`, with the time of the last ingested update) advances only after an update is ingested. An offset over 6 days old is not sent (Telegram may restart update ids at a random lower value after a week without updates); the stored id then follows the new ids down, and redeliveries are deduplicated by ingest.
+- `owner:add --transport telegram [--bot-username <name>]` prints the exact `/start <code>` text and a `t.me/<bot>?start=<code>` link.
+
 ## 8. Flows
 
 ### 8.1 Inbound routing (deterministic, before any model)
@@ -325,7 +353,7 @@ Without `ADMIN_TOKEN` the routes are not registered (I1).
 2. Unknown `agentAddress` → log, drop.
 3. Pairing: if the agent has no `owner_address` and the text is `/start <code>` matching the unexpired pairing code → bind owner, ack. A wrong or missing code is treated like any stranger.
 4. Sender is owner (I1):
-   - `pause` / `resume` (exact, case-insensitive, optional leading `/`) → store the message, send the single ack (internal ack path), run `onPause` / `onResume`, in lane order. The state was already flipped at ingest (step 1); the job reuses that recorded result and never flips or logs a second time (it flips only if the sender became the owner after ingest, by a pairing earlier in the lane).
+   - `pause` / `resume` (exact, case-insensitive, optional leading `/`) → store the message, send the single ack (internal ack path), run `onPause` / `onResume`, in lane order. The state was already flipped at ingest (step 1); the job reuses that recorded result and never flips or logs a second time (it flips only if the sender became the owner after ingest, by a pairing earlier in the lane). An ack that fails permanently (owner blocked the bot; logged as `outbound.failed`) does not stop the hooks.
    - Paused → store, log (`inbound.held`), stop. Held = the agent is paused at processing time **or** was paused when the message arrived (`paused_at_arrival`). This includes messages that arrived before the pause but are processed after it, retries of older jobs, and messages that arrived while paused whose job runs after a later `resume` was ingested.
    - `ownerInterceptors` (approval resolver) → handled? stop.
    - `onOwnerMessage` (the Brain).

@@ -5,6 +5,7 @@ import { openDb } from './db/open.js';
 import { createDeps } from './deps.js';
 import { defaultModules } from './modules.js';
 import { buildServer } from './server.js';
+import { startTelegram } from './transport/telegram/start.js';
 
 async function main(): Promise<void> {
   const config = parseConfig(process.env);
@@ -16,6 +17,7 @@ async function main(): Promise<void> {
   const server = buildServer(app);
   await server.listen({ port: config.PORT, host: '0.0.0.0' });
   await app.start();
+  const stopTelegram = await startTelegram(app);
   deps.log.info({ port: config.PORT, transport: config.TRANSPORT }, 'violet started');
 
   let stopping = false;
@@ -24,6 +26,7 @@ async function main(): Promise<void> {
     stopping = true;
     deps.log.info({ signal }, 'shutting down');
     try {
+      await stopTelegram();
       await server.close();
       await app.stop();
       await db.close();
