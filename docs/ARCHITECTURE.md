@@ -75,7 +75,7 @@ the same commit.
 - **Db adapter**: one interface, two drivers. `PgDb` (node-postgres) for real Postgres. `PgliteDb` (Postgres compiled to WASM, in-process) for zero-setup tests, the demo, and local dev when `DATABASE_URL` is unset. Driver differences are hidden in the adapter: never read `bigint` columns raw (cast `::int` / `::text` in SQL), always `count(*)::int`.
 - IDs: `crypto.randomUUID()` stored as `text`. Times: `timestamptz`. No `Date.now()` in app code — everything takes a `Clock`.
 - Tests: `vitest`. Default driver PGlite in-memory. If `TEST_DATABASE_URL` is set, each test world creates and drops its own schema in real Postgres. Both must pass.
-- Scripts: `npm run typecheck`, `npm test`, `npm run test:pg`, `npm run migrate`, `npm run dev`, `npm run demo`, `npm run owner:add`.
+- Scripts: `npm run build` (tsc to `dist/`, copies the `.sql` migrations), `npm run typecheck`, `npm test`, `npm run test:pg`, `npm run migrate`, `npm run dev`, `npm run demo`, `npm run owner:add`.
 - Test personas are **Alex** and **Sam**. No real names, numbers, emails or keys anywhere in the repo.
 - `.gitignore`: `node_modules`, `dist`, `.env*` (except `.env.example`), `.data`, `.worktrees`.
 
@@ -86,11 +86,13 @@ src/
   config.ts            env parsing (zod)
   clock.ts             Clock, SystemClock, FakeClock
   app.ts               buildApp(deps, modules) — composition root
+  deps.ts              production wiring of providers (clock, transport, llm, google, logger)
   modules.ts           defaultModules list (one line per milestone)
   server.ts            Fastify: /healthz, webhooks, oauth, dev endpoints
-  db/                  db.ts (Db, PgDb, PgliteDb), migrate.ts, migrations/*.sql
+  db/                  db.ts (Db, PgDb, PgliteDb), open.ts, migrate.ts, migrations/*.sql
   core/                types.ts, repos/*, router.ts, outbound.ts, jobs.ts,
-                       scheduler.ts, actionLog.ts, flags.ts, setup.ts, canned.ts, sanitize.ts
+                       scheduler.ts, actionLog.ts, flags.ts, setup.ts, pairing.ts, canned.ts, sanitize.ts,
+                       later.ts (placeholder interfaces for services later milestones install)
   transport/           types.ts, fake.ts, telegram/*
   llm/                 types.ts (LlmClient), anthropic.ts, scripted.ts, toolLoop.ts
   brain/               brain.ts, prompt.ts, tools/*, untrusted.ts
@@ -109,18 +111,21 @@ test/
 Migration files are pre-assigned so parallel milestones never collide.
 
 **001_core.sql (M1)**
+
+`messages`, `jobs`, `flags` and `contact_notes` also have `seq bigserial unique`: a stable order for
+rows written at the same clock instant (the FakeClock makes that common). Order by `seq`; never read it raw.
 - `households(id, name, created_at)`
 - `owners(id, household_id, name, timezone, digest_hour default 18, created_at)`
 - `agents(id, owner_id unique, name default 'Violet', transport, agent_address, owner_address null, pairing_code_hash null, pairing_expires_at null, paused bool, paused_at null, created_at, unique(transport, agent_address))`
 - `contacts(id, agent_id, transport, address, display_name null, kind 'owner'|'stranger', first_seen_at, last_seen_at, last_canned_reply_at null, unique(agent_id, transport, address))`
 - `contact_notes(id, agent_id, contact_id null, subject null, body, created_at)`
 - `messages(id, agent_id, thread 'owner'|'contact', contact_id null, direction 'in'|'out', body, purpose null, transport_message_id null, reply_to_transport_message_id null, meta jsonb, created_at)`
-- `inbound_events(id, transport, transport_message_id, agent_address, payload jsonb, received_at, processed_at null, unique(transport, transport_message_id))`
-- `jobs(id, type, lane null, payload jsonb, status 'queued'|'running'|'done'|'failed'|'dead', attempts, max_attempts, run_at, locked_at null, last_error null, dedupe_key unique null, created_at, finished_at null)`
+- `inbound_events(id, transport, transport_message_id, agent_address, payload jsonb, received_at, processed_at null, progress jsonb default '{}', unique(transport, transport_message_id))` — `progress` maps each routing step already done to its result, so a retried `inbound.process` job resumes instead of redoing side effects.
+- `jobs(id, type, lane null, payload jsonb, status 'queued'|'running'|'done'|'failed'|'dead', attempts, max_attempts, run_at, locked_at null, last_error null, dedupe_key unique null, created_at, finished_at null)` — `failed` = waiting for a retry at `run_at`; `dead` = out of attempts. A partial unique index on `lane where status = 'running'` makes "one running job per lane" a database rule. `dedupe_key` is unique for the table's lifetime (an idempotency key, not "one active job"). A lane runs in order: a job is claimable only while **no older unfinished job of its lane** exists — `queued` and due, `failed` (waiting for a retry) or `running` — whatever row locks other workers hold (a head job another worker has locked but not yet marked running still holds the lane). A `queued` job scheduled for later takes its place in the lane when it becomes due. **Visibility timeout:** every pump first recovers jobs still `running` after `staleMs` (default 10 min, measured on the `Clock` from `locked_at`): one that used its last attempt becomes `dead` (+ `job.dead`), any other is requeued as `failed`, due now. So a crashed worker or a finish that could not be written never wedges a lane, and handlers run **at least once**. An attempt's outcome is written only if the row still carries that attempt number, so a late finish from a lost worker is a no-op. `job.dead` rows carry `agent_id` when the lane is an agent id.
 - `flags(id, agent_id, kind, urgency 'now'|'digest', text, dedupe_key null, status 'pending'|'sent'|'suppressed', created_at, delivered_at null, digest_date null, unique(agent_id, dedupe_key))`
 - `scheduler_state(name, scope, last_run_at, primary key(name, scope))`
 - `action_log(id bigserial, at, agent_id null, actor, action, detail jsonb)` + append-only trigger
-- `schema_migrations(version, applied_at)`
+- `schema_migrations(version, applied_at)` — `migrate()` is safe to run from several processes at once (every instance migrates at boot): each script takes a transaction-level advisory lock on the schema and inserts its version row first, so the loser of a race rolls back and skips.
 
 **002_approvals.sql (M2)**
 - `approvals(id, agent_id, ref int, kind, payload jsonb, prompt, status 'pending'|'approved'|'denied'|'expired'|'cancelled'|'executed'|'failed', group_id null, prompt_transport_message_id null, created_at, expires_at, resolved_at null, resolved_by_message_id null, executed_at null, error null, unique(agent_id, ref))`
@@ -149,6 +154,7 @@ export interface Queryable {
 }
 export interface Db extends Queryable {
   tx<T>(fn: (tx: Queryable) => Promise<T>): Promise<T>;
+  exec(sql: string): Promise<void>;   // multi-statement script, no params (migrations; runs atomically)
   close(): Promise<void>;
 }
 
@@ -188,6 +194,8 @@ export interface OutboundGateway {
   sendToOwner(agentId: string, text: string, opts: { purpose: Exclude<OutboundPurpose, 'canned'>; buttons?: { id: string; label: string }[] }): Promise<{ messageId: string; transportMessageId: string } | null>;
   sendCanned(agentId: string, contactId: string, key: CannedKey): Promise<void>;
 }
+// createOutbound() also returns a ControlChannel { sendPauseAck } that only the router
+// receives: the single pause/resume ack (I14) is not reachable through the gateway.
 
 // src/llm/types.ts — mirrors the Anthropic Messages API shape
 export type LlmBlock =
@@ -233,15 +241,23 @@ export interface FlagService {
 // src/core/jobs.ts — DB-backed queue; one running job per lane (lane = agent id)
 export interface JobQueue {
   register(type: string, handler: (payload: any) => Promise<void>): void;
-  enqueue(type: string, payload: unknown, opts?: { lane?: string; runAt?: Date; dedupeKey?: string }): Promise<void>;
-  pump(): Promise<number>;           // run all currently runnable jobs; returns how many ran
+  enqueue(type: string, payload: unknown, opts?: { lane?: string; runAt?: Date; dedupeKey?: string; tx?: Queryable }): Promise<void>; // tx: commit with the caller's transaction
+  pump(): Promise<number>;           // recover stale running jobs, then run all runnable ones; returns how many ran
   start(): void; stop(): Promise<void>;
 }
 
 // src/core/scheduler.ts
 export interface Scheduler {
   register(name: string, everyMs: number, fn: (now: Date) => Promise<void>): void;
+  /** Once per active agent (scheduler_state.scope = agent id); paused agents are skipped (I14). */
+  registerPerAgent(name: string, everyMs: number, fn: (agentId: string, now: Date) => Promise<void>): void;
   runDue(): Promise<void>;
+}
+
+// src/core/actionLog.ts
+export interface ActionLog {
+  write(entry: { agentId?: string | null; actor: Actor; action: string; detail?: Record<string, unknown> }, q?: Queryable): Promise<void>;
+  list(filter?: { action?: string; agentId?: string }): Promise<ActionRow[]>;
 }
 
 // src/app.ts
@@ -271,6 +287,13 @@ export interface RouterHooks {
 }
 ```
 
+Routing is resumable (I18): each step of flow 8.1 (route decision, stored message +
+`inbound.received`, pause state, ack, canned reply, flag, hooks) is recorded in
+`inbound_events.progress`, and a retried job skips the steps already done. DB-only
+steps commit with their record in one transaction (exactly once). Steps that send or
+call hooks are recorded after they succeed, so **hooks run at least once per
+`messageId`**: a hook with side effects keys them on `ctx.messageId`.
+
 ### Test world (M1 creates, everyone uses)
 
 ```ts
@@ -287,20 +310,32 @@ w.llm.on({ agentId, mind: 'brain' }, (req, n) => response);
 await w.close();
 ```
 
+### Dev endpoints
+
+`/dev/inbound` (speaks as any sender, owners included) and `/dev/outbox` exist only with
+`TRANSPORT=fake`, `NODE_ENV` not `production`, **and** `ADMIN_TOKEN` set. Every call
+needs `Authorization: Bearer <ADMIN_TOKEN>` (constant-time compare); otherwise 401.
+Without `ADMIN_TOKEN` the routes are not registered (I1).
+
 ## 8. Flows
 
 ### 8.1 Inbound routing (deterministic, before any model)
 
-1. Webhook authenticates, normalizes to `InboundMessage`, calls `app.ingest` → insert `inbound_events` (dedupe) + enqueue `inbound.process` on lane = agent → return 200.
+1. Webhook authenticates, normalizes to `InboundMessage`, calls `app.ingest` → insert `inbound_events` (dedupe) + enqueue `inbound.process` on lane = agent, in one transaction (a failed enqueue rolls back the insert, so a redelivery is not mistaken for a duplicate) → return 200. **Pause is immediate:** if the sender is the owner (I1) and the text is exactly `pause` / `resume` (rule of step 4), the same transaction locks the agent row (`SELECT … FOR UPDATE`, also when the command changes nothing), flips `agents.paused` if it differs, writes `agent.paused` / `agent.resumed` and records the `pause.state` step in `progress`. Because every pause/resume command serializes on that row lock, concurrent commands enqueue their jobs in flip order and the last ack always matches the final state. Any other message that arrives while the agent is paused gets the `paused_at_arrival` step recorded. A redelivery inserts nothing, so it flips nothing.
 2. Unknown `agentAddress` → log, drop.
 3. Pairing: if the agent has no `owner_address` and the text is `/start <code>` matching the unexpired pairing code → bind owner, ack. A wrong or missing code is treated like any stranger.
 4. Sender is owner (I1):
-   - `pause` / `resume` (exact, case-insensitive, optional leading `/`) → flip state, one ack.
-   - Paused → store, log, stop.
+   - `pause` / `resume` (exact, case-insensitive, optional leading `/`) → store the message, send the single ack (internal ack path), run `onPause` / `onResume`, in lane order. The state was already flipped at ingest (step 1); the job reuses that recorded result and never flips or logs a second time (it flips only if the sender became the owner after ingest, by a pairing earlier in the lane).
+   - Paused → store, log (`inbound.held`), stop. Held = the agent is paused at processing time **or** was paused when the message arrived (`paused_at_arrival`). This includes messages that arrived before the pause but are processed after it, retries of older jobs, and messages that arrived while paused whose job runs after a later `resume` was ingested.
    - `ownerInterceptors` (approval resolver) → handled? stop.
    - `onOwnerMessage` (the Brain).
-5. Sender is not owner (I3): upsert contact, store message, log. Paused → stop. Otherwise send the canned reply if none was sent to this contact in the last 12 h, and raise a `digest` flag ("Message from …").
+5. Sender is not owner (I3): upsert contact, store message, log. Paused (same held rule as step 4) → stop. Otherwise raise a `digest` flag (`Message from “<name>”: “<text>”`, both quoted, I13), then send the canned reply if none was sent to this contact in the last 12 h. The flag comes first so a canned reply that can never be delivered does not keep it back. The canned reply is **best-effort**: one attempt; every attempt leaves an outbound row (I15): a failure before or during the send is logged as `outbound.failed`, and a text that was delivered is logged as `outbound.sent` even if storing its `messages` row then fails (`recorded: false`). A failure never fails the job, retries or holds the lane.
 6. Unsupported media: owner gets "I can only read text for now."; strangers get the normal canned flow.
+
+Action names written by M1 (I15): `inbound.received`, `inbound.duplicate`, `inbound.dropped`, `inbound.held`,
+`pairing.code_issued`, `pairing.bound`, `pairing.failed`, `agent.paused`, `agent.resumed`, `outbound.sent`,
+`outbound.suppressed`, `outbound.failed`, `canned.rate_limited`, `flag.raised`, `job.dead`, `scheduler.failed`,
+`household.created`, `owner.created`.
 
 ### 8.2 Owner turn (Brain)
 
@@ -335,7 +370,7 @@ Each delivery runs one **Envoy turn** on the receiving side: context = own brief
 
 ### 8.6 Pause
 
-`pause` → state flips, one ack, then silence to everyone (I14). `resume` → ack, `onResume` hooks run (waiting Envoy turns are re-queued; stranger messages taken meanwhile appear in the next digest).
+`pause` → state flips at ingest (never behind the lane's backlog), one ack, then silence to everyone (I14). Because the gateway checks `paused` at send time, nothing an older job or its retry tries to send gets out once the pause is ingested. Messages that arrive while paused stay held even if a `resume` is ingested before their job runs. `resume` → ack, `onResume` hooks run (waiting Envoy turns are re-queued; stranger messages taken meanwhile appear in the next digest).
 
 ## 9. Milestones
 
