@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { calendarEventPayload } from '../../approvals/calendarEvent.js';
-import { promptSummary } from '../../approvals/repo.js';
 import type { BusyInterval } from '../../google/types.js';
 import { ToolError } from '../../llm/tools.js';
 import { formatDateTime, formatDay, formatRange, isoInZone, isoInstant } from '../time.js';
@@ -14,6 +13,13 @@ const rangeInput = z.object({
 });
 
 const MAX_EVENTS = 100;
+
+/** Fixed tool results of request_calendar_event: true whatever the model does next. */
+export const CALENDAR_TOOL_TEXT = Object.freeze({
+  requested:
+    'The owner gets a yes/no prompt for this right after your reply. Do not repeat it or ask them to confirm in your own words. Nothing is booked unless they say yes.',
+  paused: 'I am paused: the owner will get a yes/no prompt for this when I can send again. Nothing is booked unless they say yes.',
+});
 
 function span(start: Date, end: Date, tz: string): string {
   return `${formatRange(start, end, tz)} [${isoInZone(start, tz)} → ${isoInZone(end, tz)}]`;
@@ -84,9 +90,10 @@ export function calendarTools(d: BrainToolDeps): BrainTool[] {
     sideEffect: true,
     async handler(input, ctx) {
       if (Date.parse(input.start) < ctx.now.getTime()) throw new ToolError('That start time is in the past.');
-      const approval = await d.approvals.request(ctx.agent.id, { kind: 'calendar_event', payload: input, idempotencyKey: ctx.callKey });
-      const sent = approval.prompt_transport_message_id !== null;
-      return `${sent ? 'Asked' : 'Will ask (when I can send again)'} the owner: ${promptSummary(approval)} Nothing is booked unless they reply yes. Do not repeat the prompt in your reply.`;
+      await d.approvals.request(ctx.agent.id, { kind: 'calendar_event', payload: input, idempotencyKey: ctx.callKey });
+      // I19: the prompt is held and goes out right after the reply (the last word of the turn).
+      const paused = (await d.repos.agents.get(ctx.agent.id))?.paused === true;
+      return paused ? CALENDAR_TOOL_TEXT.paused : CALENDAR_TOOL_TEXT.requested;
     },
   };
 

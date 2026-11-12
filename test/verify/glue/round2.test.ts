@@ -149,17 +149,21 @@ describe('glue round 2: digest wiring', () => {
     await at(w, '2026-11-10T18:00');
     const line = `- #${a.ref} Dinner — Fri Nov 20, 7:00–8:00 PM. Book it?`;
     expect(digestsTo(w, w.alex)).toEqual([`Today:\nWaiting for you\n${line}`, `Today:\nWaiting for you\n${line}`]);
-    await w.ownerSays(w.alex, `no #${a.ref}`);
+    await w.ownerSays(w.alex, `no #${a.ref}`); // I19: under the digest, so the prompt is shown again first
+    await w.ownerSays(w.alex, 'no');
     expect(await w.app.digest!.preview(w.alex.agent.id)).toBeNull();
   });
 
-  it("'yes #ref' sent as a reply to the digest books exactly that approval", async () => {
+  it("'yes #ref' sent as a reply to the digest shows exactly that prompt again (I19); the yes under it books exactly that approval", async () => {
     w = await createTestWorld({ start: local(NY, '2026-11-09T10:00') });
     const a = await w.app.approvals!.request(w.alex.agent.id, { kind: 'calendar_event', payload: event(13, 19) });
     const b = await w.app.approvals!.request(w.alex.agent.id, { kind: 'calendar_event', payload: event(14, 12, 'Lunch') });
     await at(w, '2026-11-09T18:00');
     const digest = w.transport.sent.find((m) => m.purpose === 'digest' && m.toAddress === w.alex.address)!;
     await w.ownerSays(w.alex, `yes #${b.ref}`, { replyToTransportMessageId: digest.transportMessageId });
+    expect((await w.app.approvals!.get(b.id))!.status).toBe('pending');
+    expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${b.prompt}`);
+    await w.ownerSays(w.alex, 'yes');
     expect((await w.app.approvals!.get(b.id))!.status).toBe('executed');
     expect((await w.app.approvals!.get(a.id))!.status).toBe('pending');
     expect(w.calendar.writes.filter((x) => x.op === 'create')).toHaveLength(1);

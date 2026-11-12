@@ -10,13 +10,14 @@ describe('concurrent resolution', () => {
   });
   afterEach(async () => w.close());
 
-  async function ownerMessage(text: string): Promise<OwnerMessageCtx> {
+  /** I19: each one replies to the genuine prompt, so every message resolves (or finds it closed) by reply-to. */
+  async function ownerMessage(text: string, replyTo: string): Promise<OwnerMessageCtx> {
     const row = await w.app.repos.messages.add({ agentId: w.alex.agent.id, thread: 'owner', direction: 'in', body: text });
     return {
       agent: w.alex.agent,
       owner: w.alex.owner,
       messageId: row.id,
-      msg: { transport: 'fake', agentAddress: w.alex.agentAddress, fromAddress: w.alex.address, kind: 'text', text, transportMessageId: row.id, receivedAt: w.clock.now() },
+      msg: { transport: 'fake', agentAddress: w.alex.agentAddress, fromAddress: w.alex.address, kind: 'text', text, transportMessageId: row.id, replyToTransportMessageId: replyTo, receivedAt: w.clock.now() },
     };
   }
 
@@ -26,7 +27,8 @@ describe('concurrent resolution', () => {
       payload: { title: 'Dinner', start: '2026-11-13T19:00:00-05:00', end: '2026-11-13T20:30:00-05:00' },
     });
     const resolver = w.app.router.hooks.ownerInterceptors[0]!;
-    const ctxs = await Promise.all([ownerMessage('yes'), ownerMessage('yes #1'), ownerMessage('👍'), ownerMessage('no')]);
+    const to = a.prompt_transport_message_id!;
+    const ctxs = await Promise.all([ownerMessage('yes', to), ownerMessage('yes #1', to), ownerMessage('👍', to), ownerMessage('no', to)]);
     const handled = await Promise.all(ctxs.map((c) => resolver(c)));
     const row = (await w.app.approvals!.get(a.id))!;
     expect(['executed', 'denied']).toContain(row.status);

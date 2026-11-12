@@ -14,6 +14,9 @@ dinner. Nothing happens until the people involved say yes.
   calendars are booked only after both people say yes.
 - Strangers get one fixed reply: it is an AI and has taken the message. The message
   goes in your digest.
+- A typed yes or no counts only right under Violet's question; otherwise Violet shows the
+  question again (or, under its own reply, treats it as conversation). The buttons work
+  whenever Violet is not paused.
 - `pause` stops it sending anything to anyone; `resume` turns it back on.
 - A digest every day at 6 pm. Urgent notes (like a calendar clash): at most 3 a day,
   never between 10 pm and 7 am.
@@ -92,6 +95,8 @@ process; `TEST_DATABASE_URL=postgres://… npm run test:pg` runs them on a real 
 - A crash at the wrong moment can make a duplicate Gmail draft or re-send a one-line
   message. If the model is down through every retry, that message gets no reply.
 - One server machine only: the scheduler is not safe across processes.
+- A typed yes or no relies on Telegram numbering a chat's messages in order. This is not
+  yet checked against live Telegram; if it is off, Violet asks again and the buttons still work.
 - The clash check cannot tell events marked "free" from busy ones.
 - After reading email or calendar details, what it tells another agent is held for the
   owner's yes more often than needed (safe first; to be tuned).

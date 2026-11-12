@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { lastPromptId } from '../i19/helpers.js';
 import { neutralizeReply } from '../../../src/brain/reply.js';
 import { createTestWorld, type TestWorld } from '../../helpers/world.js';
 import { brainCalls, scriptBrain, toolUse } from '../brain/script.js';
@@ -50,8 +51,9 @@ describe('Brain hardening (K1 history hygiene, K2 reply neutralizer)', () => {
     expect(JSON.stringify(last.messages)).toContain('<untrusted source=\\"agent\\">\\n#1 With Sam');
     expect((await w.actions({ action: 'brain.turn' })).at(-1)!.detail.tainted).toBe(true);
     // The resolver's replies and the a2a lines quote the other agent's text: stored tainted.
-    await w.ownerSays(w.alex, 'yes');
-    await w.ownerSays(w.sam, 'yes');
+    // I19: typed answers count under the real prompt (here: as replies to it).
+    await w.ownerSays(w.alex, 'yes', { replyToTransportMessageId: lastPromptId(w, w.alex) });
+    await w.ownerSays(w.sam, 'yes', { replyToTransportMessageId: lastPromptId(w, w.sam) });
     const out = (await w.db.query<{ body: string; meta: Record<string, unknown> }>(`SELECT body, meta FROM messages WHERE agent_id = $1 AND direction = 'out' AND body LIKE 'Booked:%'`, [w.sam.agent.id])).rows;
     expect(out).toHaveLength(1);
     expect(out[0]!.meta.tainted).toBe(true);

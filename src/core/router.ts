@@ -217,7 +217,13 @@ export function createRouter(deps: Deps): Router {
         transportMessageId: msg.transportMessageId,
         replyToTransportMessageId: msg.replyToTransportMessageId ?? null,
         // inboundEventId: M2's resolver orders the message by its event's arrival (principle 5).
-        meta: { kind: msg.kind, inboundEventId: eventId, ...(msg.buttonPayload ? { buttonPayload: msg.buttonPayload } : {}) },
+        // chatMessageId: the message's number in its chat (I19, the resolver's ground truth for "directly above").
+        meta: {
+          kind: msg.kind,
+          inboundEventId: eventId,
+          ...(msg.buttonPayload ? { buttonPayload: msg.buttonPayload } : {}),
+          ...(msg.chatMessageId ? { chatMessageId: msg.chatMessageId } : {}),
+        },
       });
       await s.log({ agentId: agent.id, actor: 'owner', action: 'inbound.received', detail: { from: 'owner', eventId, messageId: stored.id, kind: msg.kind } });
       return { messageId: stored.id };

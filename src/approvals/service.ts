@@ -3,8 +3,10 @@ import type { App } from '../app.js';
 import { sanitize } from '../core/sanitize.js';
 import { pgErrorCode } from '../db/db.js';
 import { createCalendarWriter } from './calendarWriter.js';
+import { deliveriesRepo, type DeliveryKind } from './deliveries.js';
 import { codeLine, NUMBER_SIGNS } from './line.js';
 import { approvalsRepo, PROMPT_TAIL, promptSummary } from './repo.js';
+import { currentTurn } from './turn.js';
 import type { ApprovalKind, ApprovalRow, ApprovalService, KindContext } from './types.js';
 
 export const DEFAULT_EXPIRY_MS = 24 * 3_600_000;
@@ -12,10 +14,24 @@ export const DEFAULT_EXPIRY_MS = 24 * 3_600_000;
 export const PROMPT_BODY_MAX = 240;
 /** How long a delivery claim holds before another sender may retry. */
 export const SEND_LEASE_MS = 120_000;
+/**
+ * How long an approval requested inside a Brain turn is held for that turn to deliver it:
+ * the job queue's stale time (10 min) plus a margin. After it, the sweep delivers it (the
+ * turn died: the prompt comes late, never never).
+ */
+export const TURN_HOLD_MS = 15 * 60_000;
+/** The one fixed prefix of a re-prompt (I19 rule d), on the same line as the stored prompt. */
+export const REPROMPT_PREFIX = 'Just to be sure: ';
 
 export interface ApprovalServiceImpl extends ApprovalService {
   kind(name: string): ApprovalKind | undefined;
   kindContext(approval: ApprovalRow): Promise<KindContext>;
+  /**
+   * Sends a claimed re-send of `a`'s stored prompt (a re-prompt with REPROMPT_PREFIX, or a
+   * "Which one?" copy) through the same gateway call as the first delivery and records its
+   * transport id. Returns false when the gateway suppressed it (paused) or the send failed.
+   */
+  resend(a: ApprovalRow, forMessageId: string, kind: Exclude<DeliveryKind, 'prompt'>): Promise<boolean>;
 }
 
 /**
@@ -48,6 +64,7 @@ export function createApprovalService(app: App): ApprovalServiceImpl {
   const { repos, actionLog, gateway, flags } = app;
   const kinds = new Map<string, ApprovalKind>();
   const repo = approvalsRepo(db, clock);
+  const deliveries = deliveriesRepo(db, clock);
   const calendar = createCalendarWriter({ db, clock, repos, calendar: provider, actionLog, flags, log, kind: (n) => kinds.get(n) });
 
   async function ownerOf(agentId: string) {
@@ -64,20 +81,29 @@ export function createApprovalService(app: App): ApprovalServiceImpl {
    * sweep) are serialized by an atomic claim: only the claimant sends, so a prompt goes out
    * once. A claim that lapses (sender died mid-send) lets the sweep try again.
    */
+  /** The one gateway call every genuine delivery goes through (purpose 'approval', buttons, tainted per kind). */
+  function sendPrompt(a: ApprovalRow, text: string) {
+    return gateway.sendToOwner(a.agent_id, text, {
+      purpose: 'approval',
+      buttons: approvalButtons(a.id),
+      ...(service.quotesThirdParty(a.kind) ? { meta: { tainted: true } } : {}),
+    });
+  }
+
   async function deliver(a: ApprovalRow): Promise<ApprovalRow> {
     if (a.status !== 'pending' || a.prompt_transport_message_id !== null) return a;
     if (!(await repo.claimSend(a.id, SEND_LEASE_MS))) return (await repo.get(a.id)) ?? a;
     try {
-      const sent = await gateway.sendToOwner(a.agent_id, a.prompt, {
-        purpose: 'approval',
-        buttons: approvalButtons(a.id),
-        ...(service.quotesThirdParty(a.kind) ? { meta: { tainted: true } } : {}),
-      });
+      const sent = await sendPrompt(a, a.prompt);
       if (!sent) {
         await repo.releaseSend(a.id); // paused: sent on resume
         return a;
       }
-      await repo.markSent(a.id, sent.transportMessageId);
+      await db.tx(async (tx) => {
+        if (await approvalsRepo(tx, clock).markSent(a.id, sent.transportMessageId)) {
+          await deliveriesRepo(tx, clock).recordFirst(a.agent_id, a.id, sent.transportMessageId);
+        }
+      });
       return { ...a, prompt_transport_message_id: sent.transportMessageId };
     } catch (err) {
       // The gateway logged outbound.failed; the sweep sends it later.
@@ -115,9 +141,12 @@ export function createApprovalService(app: App): ApprovalServiceImpl {
       const payload = kind.schema.parse(r.payload);
       const { owner } = await ownerOf(agentId);
       const key = r.idempotencyKey ?? null;
+      // Inside a Brain turn the prompt is held: the turn delivers it after its reply (deliverTurn).
+      const turn = currentTurn();
+      const deliverNow = (a: ApprovalRow) => (turn === undefined ? deliver(a) : a);
       if (key) {
         const existing = await repo.byKey(agentId, key);
-        if (existing) return deliver(existing);
+        if (existing) return deliverNow(existing);
       }
       const rendered = kind.render(payload, { timezone: owner.timezone });
       let created: ApprovalRow;
@@ -131,6 +160,8 @@ export function createApprovalService(app: App): ApprovalServiceImpl {
             groupId: r.groupId ?? null,
             expiresAt: expiryOf(kind, payload, r.expiresAt),
             idempotencyKey: key,
+            holdUntil: turn === undefined ? null : addMs(clock.now(), TURN_HOLD_MS),
+            turnMessageId: turn ?? null,
           });
           await actionLog.write(
             { agentId, actor: 'system', action: 'approval.requested', detail: { approvalId: row.id, ref: row.ref, kind: row.kind, groupId: row.group_id } },
@@ -144,7 +175,26 @@ export function createApprovalService(app: App): ApprovalServiceImpl {
         if (!raced) throw err;
         created = raced;
       }
-      return deliver(created);
+      return deliverNow(created);
+    },
+
+    async deliverTurn(agentId, messageId) {
+      // Creation order, hold ignored; also picks up approvals an earlier attempt of the turn left.
+      for (const a of await repo.listTurnUnsent(agentId, messageId)) await deliver(a);
+      await repo.releaseTurn(agentId, messageId);
+    },
+
+    async resend(a, forMessageId, kind) {
+      const text = kind === 'reprompt' ? `${REPROMPT_PREFIX}${a.prompt}` : a.prompt;
+      try {
+        const sent = await sendPrompt(a, text);
+        if (sent) await deliveries.markSent(a.agent_id, forMessageId, a.id, sent.transportMessageId);
+        return sent !== null;
+      } catch (err) {
+        // The gateway logged outbound.failed. The claim stays: a retry never sends it again.
+        log.warn({ approvalId: a.id, err: err instanceof Error ? err.message : String(err) }, 'approval prompt not re-sent');
+        return false;
+      }
     },
 
     get: (id) => repo.get(id),

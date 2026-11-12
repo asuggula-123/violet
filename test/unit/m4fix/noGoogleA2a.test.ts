@@ -29,7 +29,7 @@ describe('a2a outcome in production without Google', () => {
 
     await n.ownerSays(w.alex, 'Dinner with Sam on Friday evening');
     // The EgressGuard cannot read the calendar, so the release is held for the owner's yes (I11).
-    expect(w.textsTo(w.alex.address)).toEqual([expect.stringMatching(/^#1 Tell Sam's Violet about “Dinner Friday”: .* Send\? Reply yes or no\.$/), 'On it.']);
+    expect(w.textsTo(w.alex.address)).toEqual(['On it.', expect.stringMatching(/^#1 Tell Sam's Violet about “Dinner Friday”: .* Send\? Reply yes or no\.$/)]);
     await n.ownerSays(w.alex, 'yes');
     expect(w.lastTo(w.sam.address)).toMatch(/^#1 With Alex: “Dinner” .* Book it\? Reply yes or no\.$/);
     await n.ownerSays(w.alex, 'yes 2');

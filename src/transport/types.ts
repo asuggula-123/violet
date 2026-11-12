@@ -16,6 +16,12 @@ export interface InboundMessage {
   /** Unique per transport — idempotency key. */
   transportMessageId: string;
   replyToTransportMessageId?: string;
+  /**
+   * I19: this message's place in its chat, '<chat>:<message number>' (the same shape as
+   * outbound ids). The transport numbers every message of a chat, in both directions, in
+   * order. Absent when the transport gives no numbering: typed answers then fail closed.
+   */
+  chatMessageId?: string;
   receivedAt: Date;
 }
 
@@ -36,7 +42,13 @@ export interface OutboundMessage {
 
 export interface Transport {
   readonly name: TransportName;
+  /** Returns '<chat>:<message number>' (for a multi-part send: of the last part). */
   send(msg: OutboundMessage): Promise<{ transportMessageId: string }>;
+  /**
+   * Test transports only: the chat number of an inbound message delivered straight to
+   * app.ingest without one. Real transports set chatMessageId when they normalize.
+   */
+  numberInbound?(msg: InboundMessage): string | undefined;
 }
 
 /**

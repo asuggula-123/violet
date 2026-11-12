@@ -41,11 +41,14 @@ describe('approvals: expiry at resolution, delivered-only implicit target, singl
     expect(await w.app.approvals!.listPending(w.alex.agent.id)).toEqual([]);
   });
 
-  it('an undelivered prompt can still be approved by its explicit ref', async () => {
+  it('an undelivered prompt named by its explicit ref is shown again (I19), and the yes under it approves it', async () => {
     w.transport.failNext(1);
     const a = await w.app.approvals!.request(w.alex.agent.id, { kind: 'calendar_event', payload: dinner });
     expect(a.prompt_transport_message_id).toBeNull();
     await w.ownerSays(w.alex, `yes #${a.ref}`);
+    expect(await status(a)).toBe('pending');
+    expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${a.prompt}`);
+    await w.ownerSays(w.alex, 'yes');
     expect(await status(a)).toBe('executed');
   });
 

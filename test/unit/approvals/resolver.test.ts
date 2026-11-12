@@ -41,17 +41,21 @@ describe('approval resolver', () => {
     expect((await w.actions({ action: 'approval.denied' })).length).toBe(1);
   });
 
-  it('several pending: an explicit ref picks one; a bare yes asks "Which one?" on one line', async () => {
+  it('several pending: a bare yes under both asks "Which one?" and re-sends each prompt; an explicit ref then picks one', async () => {
     const a = await ask(w.alex, 'Dinner', 19);
     const b = await ask(w.alex, 'Lunch', 12);
+    const before = w.textsTo(w.alex.address).length;
     await w.ownerSays(w.alex, 'yes');
-    expect(w.lastTo(w.alex.address)).toBe('Which one? #1 Dinner — Fri Nov 13, 7:00–7:30 PM. Book it? · #2 Lunch — Fri Nov 13, 12:00–12:30 PM. Book it? — reply yes 1 or no 1.');
-    expect(w.lastTo(w.alex.address)).not.toContain('\n');
+    // I19 (e): one fixed line with no refs, then each prompt as its own genuine message.
+    expect(w.textsTo(w.alex.address).slice(before)).toEqual([RESOLVER_TEXT.whichOne(0), a.prompt, b.prompt]);
     expect([await status(a), await status(b)]).toEqual(['pending', 'pending']);
     expect((await w.actions({ action: 'approval.ambiguous' })).length).toBe(1);
-    await w.ownerSays(w.alex, 'no #2');
+    await w.ownerSays(w.alex, 'no #2'); // #2's copy is in the run right above
     expect([await status(a), await status(b)]).toEqual(['pending', 'denied']);
-    await w.ownerSays(w.alex, 'yes'); // now only #1 is pending
+    await w.ownerSays(w.alex, 'yes'); // only #1 is pending, but its prompt is not right above: shown again
+    expect(await status(a)).toBe('pending');
+    expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${a.prompt}`);
+    await w.ownerSays(w.alex, 'yes');
     expect(await status(a)).toBe('executed');
     expect(brainCalls()).toBe(0);
   });
@@ -63,13 +67,16 @@ describe('approval resolver', () => {
     expect([await status(a), await status(b)]).toEqual(['pending', 'executed']);
   });
 
-  it('a reply to a message that is not a prompt never picks the implicit target: it asks "Which one?"', async () => {
+  it('a reply to a message that is not a prompt resolves nothing, even with a ref: the prompt is shown again', async () => {
     const a = await ask(w.alex, 'Dinner');
     await w.ownerSays(w.alex, 'yes', { replyToTransportMessageId: 'something-else' });
     expect(await status(a)).toBe('pending');
-    expect(w.lastTo(w.alex.address)).toMatch(/^Which one\? #1 Dinner/);
-    // An explicit ref still works alongside such a reply-to.
+    expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${a.prompt}`);
+    // I19 (a): the reply-to is checked first; it names no prompt, so the ref only gets a re-prompt.
     await w.ownerSays(w.alex, `yes ${a.ref}`, { replyToTransportMessageId: 'something-else' });
+    expect(await status(a)).toBe('pending');
+    expect((await w.actions({ action: 'approval.reprompted' })).length).toBe(2);
+    await w.ownerSays(w.alex, 'yes');
     expect(await status(a)).toBe('executed');
   });
 

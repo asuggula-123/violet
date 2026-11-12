@@ -39,6 +39,11 @@ export interface Brain {
   readonly tools: ToolRegistry<BrainToolCtx>;
   /** Extra dynamic-prompt sections, in order (M4: agent conversations and open Envoy questions). */
   readonly contextProviders: BrainContextProvider[];
+  /**
+   * Run at the end of a turn, after its reply and before its approval prompts (I19,
+   * prompt-last): M4 sends the notices the turn queued here, so the prompts come last.
+   */
+  readonly beforePrompts: Array<(agentId: string, messageId: string) => Promise<void>>;
   /** One owner turn (installed as router.hooks.onOwnerMessage). Idempotent per ctx.messageId. */
   handle(ctx: OwnerMessageCtx): Promise<void>;
 }

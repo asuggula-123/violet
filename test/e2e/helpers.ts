@@ -177,8 +177,8 @@ export async function a2aRows(w: TestWorld): Promise<Array<{ conversation_id: st
   ).rows;
 }
 
-export async function approvalsOf(w: TestWorld, p: Persona): Promise<Array<{ ref: number; kind: string; status: string; prompt: string }>> {
-  return (await w.db.query<never>('SELECT ref, kind, status, prompt FROM approvals WHERE agent_id = $1 ORDER BY ref', [p.agent.id])).rows;
+export async function approvalsOf(w: TestWorld, p: Persona): Promise<Array<{ id: string; ref: number; kind: string; status: string; prompt: string }>> {
+  return (await w.db.query<never>('SELECT id, ref, kind, status, prompt FROM approvals WHERE agent_id = $1 ORDER BY ref', [p.agent.id])).rows;
 }
 
 /** Texts sent to an address, with their purpose. */

@@ -1,7 +1,8 @@
 import type { App } from '../app.js';
 import type { OwnerMessageCtx } from '../core/router.js';
-import { sanitize } from '../core/sanitize.js';
-import { approvalsRepo, promptSummary } from './repo.js';
+import { idsAbove } from '../transport/chatOrder.js';
+import { claimDeliveries, deliveriesRepo } from './deliveries.js';
+import { approvalsRepo } from './repo.js';
 import type { ApprovalServiceImpl } from './service.js';
 import type { ApprovalRow } from './types.js';
 
@@ -9,50 +10,69 @@ export type Decision = 'approved' | 'denied';
 
 const YES = ['yes', 'y', 'yep', 'yeah', 'ok', 'okay', 'sure', 'approve', 'do it', 'go ahead', '👍'];
 const NO = ['no', 'n', 'nope', 'nah', "don't", 'decline', 'cancel', '👎'];
+/**
+ * I19 (c): words that often just acknowledge something. Typed bare with no genuine prompt
+ * directly above, they never re-prompt: the Brain gets them. Directly under a prompt they
+ * answer it like any yes.
+ */
+export const WEAK_ACKS = ['ok', 'okay', 'sure', '👍'];
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const WORDS = [...YES, ...NO].sort((a, b) => b.length - a.length).map(escape).join('|');
 const GRAMMAR = new RegExp(`^(${WORDS})(?:\\s*#?\\s*(\\d{1,6}))?[\\s.!]*$`, 'u');
 /** Emoji presentation selector and skin tones: 👍🏽 counts as 👍. */
 const EMOJI_NOISE = /[\u{FE0F}\u{1F3FB}-\u{1F3FF}]/gu;
 
-/** Section 8.3 grammar: a yes/no word, optionally followed by `#?<ref>`. Anything else → null. */
-export function parseDecision(text: string): { decision: Decision; ref?: number } | null {
+function match(text: string): { word: string; ref?: number } | null {
   const t = text.normalize('NFKC').replace(EMOJI_NOISE, '').replace(/[’‘`]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
   const m = GRAMMAR.exec(t);
   if (!m) return null;
-  const decision: Decision = YES.includes(m[1]!) ? 'approved' : 'denied';
-  return m[2] ? { decision, ref: Number(m[2]) } : { decision };
+  return m[2] ? { word: m[1]!, ref: Number(m[2]) } : { word: m[1]! };
+}
+
+/** Section 8.3 grammar: a yes/no word, optionally followed by `#?<ref>`. Anything else → null. */
+export function parseDecision(text: string): { decision: Decision; ref?: number } | null {
+  const m = match(text);
+  if (!m) return null;
+  const decision: Decision = YES.includes(m.word) ? 'approved' : 'denied';
+  return m.ref !== undefined ? { decision, ref: m.ref } : { decision };
+}
+
+/** A bare weak acknowledgement (WEAK_ACKS, no ref). */
+export function isWeakAck(text: string): boolean {
+  const m = match(text);
+  return m !== null && m.ref === undefined && WEAK_ACKS.includes(m.word);
 }
 
 const BUTTON = /^(approve|deny):([A-Za-z0-9-]{1,64})$/;
+
+/** How many prompts one "Which one?" re-sends (oldest first). */
+export const WHICH_ONE_LIMIT = 5;
 
 export const RESOLVER_TEXT = Object.freeze({
   notOpen: (ref?: number) => (ref === undefined ? "That one isn't open any more." : `#${ref} isn't open any more.`),
   approvedDefault: (ref: number) => `Okay, approved #${ref}.`,
   deniedDefault: (ref: number) => `Okay, not doing #${ref}.`,
+  /** Fixed, no quoted content and no refs: the prompts follow, each as its own message. */
+  whichOne: (more: number) =>
+    `Which one? Tap Yes or No under it, or reply yes and its number.${more > 0 ? ` ${more} more ${more === 1 ? 'is' : 'are'} waiting after these.` : ''}`,
 });
 
-export const WHICH_ONE_MAX = 600;
-
-/** "Which one?" with a one-line list of what is pending. */
-export function whichOne(pending: ApprovalRow[]): string {
-  const list = pending.map((a) => promptSummary(a)).join(' · ');
-  const ref = pending[0]?.ref ?? 1;
-  return sanitize(`Which one? ${list} — reply yes ${ref} or no ${ref}.`, WHICH_ONE_MAX);
-}
+type Basis = 'reply_to' | 'run';
 
 /**
- * The deterministic approval resolver (I5): an owner interceptor. The router runs it only
- * for the verified owner (I1) and never while paused (I14). Target: explicit ref (an
- * approval that existed when the message was stored) → the prompt being replied to → the
- * only pending approval whose prompt was delivered before the message → "Which one?". A
- * reply-to naming no prompt never takes the implicit target. Nothing answerable → not
- * handled (the Brain gets the message). Idempotent per message: a retried
- * hook finds the approval it already resolved (resolved_by_message_id) and finishes it.
+ * The deterministic approval resolver (I5, I19): an owner interceptor. The router runs it
+ * only for the verified owner (I1) and never while paused (I14). A typed yes/no resolves an
+ * approval only when a genuine delivery of it (approval_deliveries) is the message replied
+ * to, or is in RUN(m), the unbroken run of genuine deliveries directly above the message in
+ * the transport's own numbering. Otherwise the prompt is shown again (re-prompt, or "Which
+ * one?" with each prompt as its own message), and nothing is resolved. Safety never depends
+ * on what any text looks like. Idempotent per message: a retried hook finds the approval it
+ * resolved (resolved_by_message_id) or the re-sends it claimed (for_message_id).
  */
 export function createResolver(app: App, service: ApprovalServiceImpl) {
   const { db, clock } = app.deps;
   const repo = approvalsRepo(db, clock);
+  const deliveries = deliveriesRepo(db, clock);
 
   /** `tainted`: the text quotes third parties (a kind with quotesThirdParty): stored tainted (8.2 history hygiene). */
   async function reply(ctx: OwnerMessageCtx, text: string, tainted = false): Promise<true> {
@@ -69,7 +89,11 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
     return reply(ctx, text || (approved ? RESOLVER_TEXT.approvedDefault(a.ref) : RESOLVER_TEXT.deniedDefault(a.ref)), service.quotesThirdParty(a.kind));
   }
 
-  async function resolve(ctx: OwnerMessageCtx, target: ApprovalRow, decision: Decision): Promise<true> {
+  function log(ctx: OwnerMessageCtx, action: string, detail: Record<string, unknown>): Promise<void> {
+    return app.actionLog.write({ agentId: ctx.agent.id, actor: 'owner', action, detail: { ...detail, messageId: ctx.messageId } });
+  }
+
+  async function resolve(ctx: OwnerMessageCtx, target: ApprovalRow, decision: Decision, basis?: Basis): Promise<true> {
     const resolved = await db.tx(async (tx) => {
       const row = await approvalsRepo(tx, clock).resolvePending(target.id, ctx.agent.id, decision, ctx.messageId);
       if (row) {
@@ -78,7 +102,7 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
             agentId: ctx.agent.id,
             actor: 'owner',
             action: decision === 'approved' ? 'approval.approved' : 'approval.denied',
-            detail: { approvalId: row.id, ref: row.ref, kind: row.kind, messageId: ctx.messageId, via: ctx.msg.kind },
+            detail: { approvalId: row.id, ref: row.ref, kind: row.kind, messageId: ctx.messageId, via: ctx.msg.kind, ...(basis ? { basis } : {}) },
           },
           tx,
         );
@@ -88,12 +112,12 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
     if (resolved) return finish(ctx, resolved);
     const now = await repo.get(target.id);
     if (now?.resolved_by_message_id === ctx.messageId) return finish(ctx, now);
-    await stale(ctx, target.id, 'not_pending');
-    return reply(ctx, RESOLVER_TEXT.notOpen(target.ref));
+    return notOpen(ctx, target.id, target.ref, 'not_pending');
   }
 
-  async function stale(ctx: OwnerMessageCtx, approvalId: string | null, reason: string): Promise<void> {
-    await app.actionLog.write({ agentId: ctx.agent.id, actor: 'owner', action: 'approval.not_open', detail: { approvalId, reason, messageId: ctx.messageId } });
+  async function notOpen(ctx: OwnerMessageCtx, approvalId: string | null, ref: number | undefined, reason: string): Promise<true> {
+    await log(ctx, 'approval.not_open', { approvalId, reason });
+    return reply(ctx, RESOLVER_TEXT.notOpen(ref));
   }
 
   async function onButton(ctx: OwnerMessageCtx): Promise<true> {
@@ -101,10 +125,98 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
     const target = m ? await repo.get(m[2]!) : null;
     if (!m || !target || target.agent_id !== ctx.agent.id) {
       // Never resolve another agent's approval, whatever the payload says.
-      await stale(ctx, null, !m ? 'bad_button' : target ? 'wrong_agent' : 'unknown_approval');
+      await log(ctx, 'approval.not_open', { approvalId: null, reason: !m ? 'bad_button' : target ? 'wrong_agent' : 'unknown_approval' });
       return reply(ctx, RESOLVER_TEXT.notOpen());
     }
     return resolve(ctx, target, m[1] === 'approve' ? 'approved' : 'denied');
+  }
+
+  /** Rule (d): the stored prompt again, as one new genuine delivery. Claimed first; only the claimant sends. */
+  async function reprompt(ctx: OwnerMessageCtx, a: ApprovalRow, reason: string): Promise<true> {
+    if (!(await claimDeliveries(db, clock, ctx.agent.id, ctx.messageId, [a.id], 'reprompt'))) return true;
+    const sent = await service.resend(a, ctx.messageId, 'reprompt');
+    await log(ctx, 'approval.reprompted', { approvalId: a.id, ref: a.ref, reason, ...(sent ? {} : { sent: false }) });
+    return true;
+  }
+
+  /** Rule (e): one fixed line, then each prompt re-sent as its own genuine delivery, oldest first. */
+  async function whichOne(ctx: OwnerMessageCtx, candidates: ApprovalRow[], reason: string): Promise<true> {
+    const shown = candidates.slice(0, WHICH_ONE_LIMIT);
+    if (!(await claimDeliveries(db, clock, ctx.agent.id, ctx.messageId, shown.map((a) => a.id), 'which_one'))) return true;
+    await log(ctx, 'approval.ambiguous', { pending: candidates.length, shown: shown.map((a) => a.id), reason });
+    await reply(ctx, RESOLVER_TEXT.whichOne(candidates.length - shown.length));
+    for (const a of shown) await service.resend(a, ctx.messageId, 'which_one');
+    return true;
+  }
+
+  /** An approval named by ref, only if it existed before the message was written (principle 5). */
+  async function byRef(ctx: OwnerMessageCtx, ref: number): Promise<ApprovalRow | null> {
+    const found = await repo.byRef(ctx.agent.id, ref);
+    return found && (await repo.existedBefore(found.id, ctx.messageId)) ? found : null;
+  }
+
+  /** Rule (b) target check, and rule (a) with a ref that does not match the replied-to prompt. */
+  async function named(ctx: OwnerMessageCtx, ref: number, run: string[] | null, decision: Decision, reason: string): Promise<true> {
+    const a = await byRef(ctx, ref);
+    if (a?.status !== 'pending') return notOpen(ctx, a?.id ?? null, ref, a ? 'not_pending' : 'unknown_ref');
+    if (run?.includes(a.id)) return resolve(ctx, a, decision, 'run');
+    return reprompt(ctx, a, reason);
+  }
+
+  /** Whether the message directly above is a Brain reply or an Envoy question: it may itself ask the owner something. */
+  async function conversationAbove(ctx: OwnerMessageCtx): Promise<boolean> {
+    const above = idsAbove(ctx.msg.chatMessageId, 1)[0];
+    if (!above) return false;
+    const res = await db.query<{ purpose: string | null; sender: string | null }>(
+      `SELECT purpose, meta->>'from' AS sender FROM messages
+       WHERE agent_id = $1 AND thread = 'owner' AND direction = 'out' AND transport_message_id = $2`,
+      [ctx.agent.id, above],
+    );
+    return res.rows.some((r) => r.sender === 'brain' || r.purpose === 'question');
+  }
+
+  /** No genuine prompt answered: show the right prompt again, or let the Brain have the message. */
+  async function askAgain(ctx: OwnerMessageCtx, also: ApprovalRow[], reason: string, conversational: boolean): Promise<boolean> {
+    const answerable = await repo.listAnswerable(ctx.agent.id, ctx.messageId);
+    const ids = new Set(answerable.map((a) => a.id));
+    const candidates = [...answerable, ...also.filter((a) => !ids.has(a.id))];
+    if (candidates.length === 0) return false;
+    if (also.length === 0) {
+      // A conversational word or a reply to something that may ask a question goes to the Brain (it cannot approve).
+      if (isWeakAck(ctx.msg.text)) return false;
+      if (conversational && (await conversationAbove(ctx))) return false;
+    }
+    if (candidates.length === 1) return reprompt(ctx, candidates[0]!, reason);
+    candidates.sort((x, y) => x.ref - y.ref);
+    return whichOne(ctx, candidates, reason);
+  }
+
+  async function onText(ctx: OwnerMessageCtx, decision: Decision, ref: number | undefined): Promise<boolean> {
+    const agentId = ctx.agent.id;
+    // (a) Reply-to, checked before RUN: binds to the real message replied to.
+    const replyTo = ctx.msg.replyToTransportMessageId;
+    if (replyTo) {
+      const replied = await repo.byPromptMessage(agentId, replyTo);
+      if (replied && (ref === undefined || ref === replied.ref)) {
+        if (replied.status === 'pending') return resolve(ctx, replied, decision, 'reply_to');
+        return notOpen(ctx, replied.id, replied.ref, 'not_pending');
+      }
+      const reason = replied ? 'ref_conflict' : 'reply_to_non_prompt';
+      if (ref !== undefined) return named(ctx, ref, null, decision, reason);
+      return askAgain(ctx, [], reason, false);
+    }
+    const run = await deliveries.run(agentId, ctx.msg.chatMessageId);
+    // (b) Explicit ref: resolves only with a genuine delivery of it in RUN(m).
+    if (ref !== undefined) return named(ctx, ref, run, decision, 'not_above');
+    // (c) Bare answer: resolves only when RUN(m) names exactly one approval and it is pending.
+    // Counted over every approval in RUN(m), closed or not: what the owner saw above is what
+    // counts, so an approval that closes between arrival and processing (the other owner's
+    // no, a closed conversation, expiry) never turns an ambiguous yes into a yes for the other.
+    const distinct = [...new Set(run)];
+    const inRun = (await repo.listPending(agentId)).filter((a) => distinct.includes(a.id));
+    if (distinct.length === 1 && inRun.length === 1) return resolve(ctx, inRun[0]!, decision, 'run');
+    if (distinct.length > 1) return askAgain(ctx, inRun, 'several_above', false);
+    return askAgain(ctx, [], 'not_above', true);
   }
 
   return async function approvalResolver(ctx: OwnerMessageCtx): Promise<boolean> {
@@ -117,40 +229,8 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
     // while paused): mark those expired first, so every target check below sees it.
     await service.expireDue(ctx.agent.id);
     if (!parsed) return onButton(ctx);
-
-    if (parsed.ref !== undefined) {
-      const found = await repo.byRef(ctx.agent.id, parsed.ref);
-      // A ref typed before that approval existed names something else (principle 5).
-      const target = found && (await repo.existedBefore(found.id, ctx.messageId)) ? found : null;
-      if (target?.status === 'pending') return resolve(ctx, target, parsed.decision);
-      await stale(ctx, target?.id ?? null, target ? 'not_pending' : 'unknown_ref');
-      return reply(ctx, RESOLVER_TEXT.notOpen(parsed.ref));
-    }
-    const replyTo = ctx.msg.replyToTransportMessageId;
-    const repliedTo = replyTo ? await repo.byPromptMessage(ctx.agent.id, replyTo) : null;
-    if (repliedTo) {
-      if (repliedTo.status === 'pending') return resolve(ctx, repliedTo, parsed.decision);
-      await stale(ctx, repliedTo.id, 'not_pending');
-      return reply(ctx, RESOLVER_TEXT.notOpen(repliedTo.ref));
-    }
-    // Implicit targets only among prompts the owner had actually seen when they wrote:
-    // delivered, and delivered BEFORE this message was stored (principle 5). A "yes" meant
-    // for something else, typed or queued before a prompt went out, or a retried hook
-    // whose Brain turn created a prompt, never approves it. An explicit #ref can still
-    // name any pending approval that existed when the message was written.
-    const pending = await repo.listAnswerable(ctx.agent.id, ctx.messageId);
-    if (pending.length === 0) return false;
-    // A reply to a message that is not one of this agent's prompts (e.g. a model reply
-    // that looks like a prompt) is an explicit signal the owner meant that message: never
-    // guess the target from it.
-    if (pending.length === 1 && !replyTo) return resolve(ctx, pending[0]!, parsed.decision);
-    await app.actionLog.write({
-      agentId: ctx.agent.id,
-      actor: 'owner',
-      action: 'approval.ambiguous',
-      detail: { pending: pending.length, messageId: ctx.messageId, ...(replyTo ? { reason: 'reply_to_non_prompt' } : {}) },
-    });
-    // The list quotes every pending prompt: tainted when any of them quotes third parties (K1).
-    return reply(ctx, whichOne(pending), pending.some((a) => service.quotesThirdParty(a.kind)));
+    // (g) A retry of a message that already caused re-sends sends nothing more.
+    if (await deliveries.claimedFor(ctx.agent.id, ctx.messageId)) return true;
+    return onText(ctx, parsed.decision, parsed.ref);
   };
 }

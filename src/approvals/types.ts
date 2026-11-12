@@ -81,8 +81,13 @@ export interface CalendarWriter {
 
 export interface ApprovalService {
   registerKind<P>(kind: string, def: ApprovalKind<P>): void;
-  /** Validates, stores and sends the prompt at once (unless paused: then it is sent on resume). */
+  /**
+   * Validates, stores and sends the prompt at once (unless paused: then it is sent on resume).
+   * Inside a Brain turn (turn.ts) the prompt is held instead: the turn delivers it after its reply.
+   */
   request(agentId: string, req: ApprovalRequest): Promise<ApprovalRow>;
+  /** End of the Brain turn of `messageId`: delivers that turn's unsent prompts in creation order. */
+  deliverTurn(agentId: string, messageId: string): Promise<void>;
   get(id: string): Promise<ApprovalRow | null>;
   listPending(agentId: string): Promise<ApprovalRow[]>;
   /** pending → cancelled. Returns false if it was no longer pending. */

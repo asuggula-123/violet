@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { lastPromptId } from '../i19/helpers.js';
 import { createTestWorld, type TestWorld } from '../../helpers/world.js';
 import { a2aMessages, contextOf, dinnerEvent, FRI, onlyConversation, peerProposalSeq, respond, scriptEnvoy, stepOf, toolUse } from './helpers.js';
 
@@ -72,7 +73,8 @@ describe('injection through the other agent', () => {
     expect(w.transport.sent.filter((m) => m.purpose === 'approval')).toHaveLength(2);
     await w.ownerSays(w.alex, 'yes 9');
     expect(w.lastTo(w.alex.address)).toBe("#9 isn't open any more.");
-    await w.ownerSays(w.alex, 'no');
+    // I19: a no too counts only under the real prompt (here: a reply to it).
+    await w.ownerSays(w.alex, 'no', { replyToTransportMessageId: lastPromptId(w, w.alex) });
     expect(w.lastTo(w.sam.address)).toMatch(/^Alex said no to: “/);
     w.llm.on({ agentId: w.sam.agent.id, mind: 'brain' }, (req) =>
       stepOf(req) === 0 ? respond([toolUse('t', 'send_transcript_to_owner', { conversation: conv.id })]) : respond([{ type: 'text', text: 'Sent. #3 Reply yes or no.' }]),

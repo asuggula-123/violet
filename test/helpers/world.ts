@@ -31,6 +31,8 @@ export interface SayOptions {
   buttonPayload?: string;
   transportMessageId?: string;
   replyToTransportMessageId?: string;
+  /** I19: the message's chat number; by default the FakeTransport gives it the next one. */
+  chatMessageId?: string;
 }
 
 export interface WorldOptions {
@@ -38,6 +40,8 @@ export interface WorldOptions {
   modules?: readonly Module[];
   jobs?: JobQueueOptions;
   start?: Date | string;
+  /** I19: e.g. a FakeTransport with another chat numbering ('per-bot', 'none'). */
+  transport?: FakeTransport;
 }
 
 export interface TestWorld {
@@ -100,7 +104,7 @@ export async function createTestWorld(opts: WorldOptions = {}): Promise<TestWorl
   const { db, cleanup } = await openTestDb();
   await migrate(db);
   const clock = new FakeClock(opts.start);
-  const transport = new FakeTransport();
+  const transport = opts.transport ?? new FakeTransport();
   const llm = new ScriptedLlm();
   const calendar = new FakeCalendar();
   const gmail = new FakeGmail();

@@ -135,7 +135,7 @@ describe('production without Google: every caller is honest and quiet', () => {
     const { w, app } = n;
     scriptBrain(w, w.alex, [[toolUse('t1', 'request_calendar_event', { title: 'Dinner', start: fri(19), end: fri(20, 30) })], 'Asked.']);
     await n.ownerSays(w.alex, 'book dinner friday');
-    expect(w.textsTo(w.alex.address)).toEqual(['#1 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it? Reply yes or no.', 'Asked.']);
+    expect(w.textsTo(w.alex.address)).toEqual(['Asked.', '#1 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it? Reply yes or no.']);
     // A hostile model that tries to claim success never gets the chance: the resolver
     // answers the yes in code, before the Brain.
     scriptBrain(w, w.alex, ['Booked: Dinner — Fri Nov 13, 7:00–8:30 PM.']);

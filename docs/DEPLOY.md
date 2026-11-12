@@ -37,7 +37,8 @@ Migrations run automatically at every boot (`src/main.ts`, before the server lis
 under a Postgres advisory lock). There is no separate migration step. The migrations are
 the plain SQL files in `src/db/migrations/`, applied in order and recorded in
 `schema_migrations`: `001_core.sql`, `002_approvals.sql`, `003_google.sql`,
-`004_a2a.sql` (the agent-to-agent tables), `005_flags.sql`, `006_transport.sql`. Production has no
+`004_a2a.sql` (the agent-to-agent tables), `005_flags.sql`, `006_transport.sql`, `007_i19.sql` (genuine
+approval deliveries, prompts held until the end of a Brain turn). Production has no
 fallback database: with `NODE_ENV=production` (set in the image) and no `DATABASE_URL`,
 the server and every CLI stop with `DATABASE_URL is missing: ...` instead of using an
 embedded database.

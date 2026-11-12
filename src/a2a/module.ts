@@ -25,7 +25,7 @@ export const a2aModule: Module = {
     const outcomes = createOutcomes(d);
     const releases = createReleases(d);
     const views = createViews(db);
-    const { service, sendNotice, after, resume } = createA2AService(d, views, outcomes);
+    const { service, sendNotice, flushNotices, after, resume } = createA2AService(d, views, outcomes);
 
     approvals.registerKind(OUTCOME_KIND, outcomes.kind);
     approvals.registerKind(RELEASE_KIND, releases.kind);
@@ -35,6 +35,7 @@ export const a2aModule: Module = {
     app.jobs.register(AFTER_JOB, (p) => after(p));
     for (const tool of a2aBrainTools(d, releases, views)) brain.tools.register(tool);
     brain.contextProviders.push(views.brainContext);
+    brain.beforePrompts.push((agentId) => flushNotices(agentId)); // I19: a turn's notices land before its prompts
     app.router.hooks.onResume.push(resume);
     app.scheduler.register('a2a.sweep', A2A_SWEEP_MS, async () => {
       await service.sweep();

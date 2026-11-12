@@ -30,6 +30,15 @@ export function createA2AService(d: A2ADeps, views: ReturnType<typeof createView
     await d.db.query(`UPDATE a2a_notices SET status = $2, sent_at = $3 WHERE id = $1 AND status <> 'sent'`, [job.id, sent ? 'sent' : 'waiting', sent ? d.clock.now() : null]);
   }
 
+  /**
+   * I19 prompt-last: a Brain turn sends the agent's pending notices (e.g. the 'Talking to …'
+   * line of a conversation it opened) before its approval prompts. The notice jobs then find them sent.
+   */
+  async function flushNotices(agentId: string): Promise<void> {
+    const res = await d.db.query<{ id: string }>(`SELECT id FROM a2a_notices WHERE agent_id = $1 AND status = 'pending' ORDER BY created_at, id`, [agentId]);
+    for (const n of res.rows) await sendNotice(n);
+  }
+
   async function after(job: { conversationId: string; event: AfterEvent; groupId?: string | null }): Promise<void> {
     const conv = await repo.conversation(job.conversationId);
     if (!conv) return;
@@ -86,5 +95,5 @@ export function createA2AService(d: A2ADeps, views: ReturnType<typeof createView
     },
   };
 
-  return { service, sendNotice, after, resume };
+  return { service, sendNotice, flushNotices, after, resume };
 }

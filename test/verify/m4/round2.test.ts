@@ -155,8 +155,10 @@ describe('M4 verify round 2', () => {
     await w.ownerSays(w.alex, 'Alex would like dinner with Sam on Friday evening');
     const prompts = w.textsTo(w.alex.address).filter((t) => /^#\d+ With Sam:/.test(t));
     expect(prompts.length).toBe(2);
+    // I19: "Which one?" comes for a yes not right under a prompt; it re-sends each prompt (with the peer text) as its own message.
+    await w.ownerSays(w.alex, 'yes 9');
     await w.ownerSays(w.alex, 'yes');
-    expect(w.lastTo(w.alex.address)).toMatch(/^Which one\?.*PEERMARK/);
+    expect(w.textsTo(w.alex.address).slice(-3).join('\n')).toMatch(/^Which one\?[\s\S]*PEERMARK/);
     await w.ownerSays(w.alex, 'no 1');
     await w.ownerSays(w.alex, 'no 2');
     w.llm.on({ agentId: w.alex.agent.id, mind: 'brain' }, () => respond([{ type: 'text', text: 'hello' }]));

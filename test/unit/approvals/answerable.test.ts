@@ -44,7 +44,11 @@ describe('approvals: only a prompt the owner had seen can be answered (principle
     expect(await status(a)).toBe('pending');
     expect(await w.actions({ action: 'approval.approved' })).toHaveLength(0);
     expect(await w.actions({ action: 'approval.denied' })).toHaveLength(0);
-    // Written after the prompt was delivered: answers it.
+    // Written after the prompt was delivered, but not right under it (I19: the replies to the
+    // queued messages came after the prompt): the prompt is shown again; a yes under that answers it.
+    await w.ownerSays(w.alex, 'yes');
+    expect(await status(a)).toBe('pending');
+    expect(await w.actions({ action: 'approval.reprompted' })).toHaveLength(1);
     await w.ownerSays(w.alex, 'yes');
     expect(await status(a)).not.toBe('pending');
     expect(await w.actions({ action: 'approval.approved' })).toHaveLength(1);
@@ -57,12 +61,12 @@ describe('approvals: only a prompt the owner had seen can be answered (principle
     expect(await approvalsRepo(w.db, w.clock).listAnswerable(w.alex.agent.id, await lastOwnerMessageId())).toEqual([]);
   });
 
-  it('a reply-to on a non-prompt message with one approval pending asks "Which one?" and resolves nothing', async () => {
+  it('a reply-to on a non-prompt message with one approval pending shows its prompt again and resolves nothing', async () => {
     const a = await w.app.approvals!.request(w.alex.agent.id, { kind: 'calendar_event', payload: dinner });
     await w.ownerSays(w.alex, 'yes', { replyToTransportMessageId: 'not-a-prompt' });
     expect(await status(a)).toBe('pending');
-    expect(w.lastTo(w.alex.address)).toMatch(/^Which one\? #1 Dinner/);
-    expect(await w.actions({ action: 'approval.ambiguous' })).toHaveLength(1);
+    expect(w.lastTo(w.alex.address)).toMatch(/^Just to be sure: #1 Dinner/);
+    expect((await w.actions({ action: 'approval.reprompted' })).map((r) => r.detail.reason)).toEqual(['reply_to_non_prompt']);
   });
 
   it('a calendar_event approval expires no later than the event start; the writer refuses a started event', async () => {

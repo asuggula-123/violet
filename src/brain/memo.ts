@@ -34,6 +34,27 @@ export function turnMemo(db: Queryable, clock: Clock) {
     async finish(messageId: string, outcome: string): Promise<void> {
       await db.query(`UPDATE brain_turns SET status = 'done', outcome = $2, finished_at = $3 WHERE message_id = $1`, [messageId, outcome, clock.now()]);
     },
+    /**
+     * I19 prompt-last: the turn's reply is out and it is closing (notices, then prompts). A
+     * retry or a duplicate run that finds this mark sends no model text: it only closes, so
+     * nothing it says can land after the turn's prompts. Stored as a reserved memo row (the
+     * '#' name is not a valid tool name), so no schema change is needed.
+     */
+    async markClosing(messageId: string, outcome: string): Promise<void> {
+      await db.query(
+        `INSERT INTO brain_tool_memo (message_id, tool, input_hash, occurrence, result, created_at) VALUES ($1, '#closing', '', 0, $2, $3)
+         ON CONFLICT DO NOTHING`,
+        [messageId, outcome, clock.now()],
+      );
+    },
+    /** The outcome stored by markClosing, or null when no attempt of the turn reached closing. */
+    async closing(messageId: string): Promise<string | null> {
+      const res = await db.query<{ result: string }>(
+        `SELECT result FROM brain_tool_memo WHERE message_id = $1 AND tool = '#closing' AND input_hash = '' AND occurrence = 0`,
+        [messageId],
+      );
+      return res.rows[0]?.result ?? null;
+    },
     async recall(messageId: string, tool: string, inputHash: string, occurrence: number): Promise<string | null> {
       const res = await db.query<{ result: string }>(
         'SELECT result FROM brain_tool_memo WHERE message_id = $1 AND tool = $2 AND input_hash = $3 AND occurrence = $4',

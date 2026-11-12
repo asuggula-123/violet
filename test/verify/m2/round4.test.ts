@@ -92,7 +92,15 @@ describe('M2 round 4: arrival ordering of owner decisions', () => {
     await w.inbound({ agentAddress: w.alex.agentAddress, fromAddress: w.alex.address, text: 'what is on friday?' });
     await w.inbound({ agentAddress: w.alex.agentAddress, fromAddress: w.alex.address, text: 'yes' });
     await w.app.settle();
-    expect(prompts()).toHaveLength(2);
+    // I19: the queued "yes" is not right under the older prompt (the owner's own message is in
+    // between): that prompt is shown again, the newer one is never touched.
+    expect(prompts()).toHaveLength(3);
+    expect(prompts().at(-1)!.text).toBe(`Just to be sure: ${older.prompt}`);
+    expect((await w.app.approvals!.get(older.id))!.status).toBe('pending');
+    // That re-prompt sits right under the newer prompt, so a bare yes under both asks "Which one?"; the ref picks it.
+    await w.ownerSays(w.alex, 'yes');
+    expect((await w.app.approvals!.get(older.id))!.status).toBe('pending');
+    await w.ownerSays(w.alex, `yes ${older.ref}`);
     const created = w.calendar.writes.filter((x) => x.op === 'create');
     expect(created.every((x) => JSON.stringify(x).includes('Lunch'))).toBe(true);
     expect(JSON.stringify(created)).not.toContain('Dinner');
@@ -119,6 +127,8 @@ describe('M2 round 4: arrival ordering of owner decisions', () => {
     await w.inbound({ agentAddress: w.alex.agentAddress, fromAddress: w.alex.address, text: 'ok' });
     await w.app.settle();
     expect(w.calendar.writes).toEqual([]);
+    // I19: a yes under the Brain's reply is conversation; "yes 1" shows the prompt again, the yes under it approves.
+    await w.ownerSays(w.alex, 'yes 1');
     await w.ownerSays(w.alex, 'yes');
     await w.ownerSays(w.alex, 'yes');
     expect(w.calendar.writes.filter((x) => x.op === 'create')).toHaveLength(1);

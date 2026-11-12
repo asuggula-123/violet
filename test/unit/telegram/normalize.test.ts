@@ -22,6 +22,7 @@ describe('normalizeUpdate', () => {
         kind: 'text',
         text: 'hi there',
         transportMessageId: `${BOT}:42`,
+        chatMessageId: '1101:9',
         receivedAt: at,
       },
     });

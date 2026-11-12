@@ -110,9 +110,10 @@ describe('Brain turn', () => {
       },
     ]);
     await w.ownerSays(w.alex, 'set up dinner with Sam');
-    expect(w.textsTo(w.alex.address)).toEqual(['#1 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it? Reply yes or no.']);
+    // I19: the prompt is held until the reply is out, so the failed reply leaves nothing sent.
+    expect(w.textsTo(w.alex.address)).toEqual([]);
     await w.advance({ seconds: 2 }); // the job retries
-    expect(w.textsTo(w.alex.address)).toEqual(['#1 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it? Reply yes or no.', 'Asked, drafted, noted.']);
+    expect(w.textsTo(w.alex.address)).toEqual(['Asked, drafted, noted.', '#1 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it? Reply yes or no.']);
     expect(brainCalls(w, w.alex)).toHaveLength(4); // the turn re-ran once…
     expect(await w.app.approvals!.listPending(w.alex.agent.id)).toHaveLength(1); // …without new side effects
     expect(w.gmail.writes).toHaveLength(1);

@@ -13,8 +13,10 @@ const WAITING = DEFAULT_SECTIONS.find((s) => s.key === 'waiting')!;
 
 /**
  * The digest's live 'Waiting for you' section (8.5): one line per approval still pending,
- * the stored code-rendered prompt without its fixed tail, `#ref` kept so the owner can
- * answer `yes #7`. The digest re-sanitizes each line and applies its caps (I13).
+ * the stored code-rendered prompt without its fixed tail, `#ref` kept so the owner can name
+ * it: `yes 7` under the digest is not under the prompt, so Violet shows prompt #7 again
+ * (I19) and a `yes` (or a button) under that answers it. The digest re-sanitizes each line
+ * and applies its caps (I13).
  */
 export function waitingSection(service: ApprovalService): DigestSection {
   return { ...WAITING, lines: async (agentId) => (await service.listPending(agentId)).map(promptSummary) };

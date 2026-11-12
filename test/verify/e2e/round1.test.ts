@@ -118,6 +118,9 @@ describe('M7 verify round 1', () => {
     await world.ownerSays(world.sam, '', { kind: 'button', buttonPayload: `approve:${alexId}` });
     await world.strangerSays(world.alex, 'stranger-btn', '', { kind: 'button', buttonPayload: `approve:${alexId}` });
     expect((await approvalsOf(world, world.alex)).map((a) => a.status)).toEqual(['pending']);
+    // I19: Sam's yes comes under the "isn't open" line, not under his prompt: shown again first.
+    await world.ownerSays(world.sam, 'yes');
+    expect(world.lastTo(world.sam.address)).toMatch(/^Just to be sure: #1 With Alex/);
     await world.ownerSays(world.sam, 'yes');
     expect(world.lastTo(world.sam.address)).toBe('Waiting for Alex.');
     expect(world.calendar.writes).toEqual([]);
@@ -128,8 +131,10 @@ describe('M7 verify round 1', () => {
     const world = w;
     await world.ownerSays(world.alex, 'Book a haircut on Thursday at 5pm');
     await world.ownerSays(world.sam, 'yes');
+    // I19: a yes right under the haircut prompt would answer it; this one comes under a non-prompt line.
+    await world.ownerSays(world.alex, 'yes 9');
     await world.ownerSays(world.alex, 'yes');
-    expect(world.lastTo(world.alex.address)).toMatch(/^Which one\?/);
+    expect(world.textsTo(world.alex.address)).toContain('Which one? Tap Yes or No under it, or reply yes and its number.');
     expect((await approvalsOf(world, world.alex)).map((a) => a.status)).toEqual(['pending', 'pending']);
     expect(world.calendar.writes).toEqual([]);
   });

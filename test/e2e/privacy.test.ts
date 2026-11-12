@@ -310,7 +310,11 @@ describe('Privacy: a hostile agent tries to extract private details — and fail
     expect(held.map((a) => /“(Email|Notes|History):/.exec(a.prompt)?.[1])).toEqual(['Email', 'Notes', 'History']);
     expect(held.every((a) => a.status === 'pending')).toBe(true);
     expect((await w.actions({ action: 'a2a.release' })).filter((a) => a.agent_id === w.alex.agent.id)).toEqual([]);
-    for (const a of held) await w.ownerSays(w.alex, `no ${a.ref}`);
+    for (const a of held) {
+      await w.ownerSays(w.alex, `no ${a.ref}`);
+      // I19: a ref typed away from its prompt shows the prompt again; the no under it counts.
+      if ((await approvalsOf(w, w.alex)).find((x) => x.ref === a.ref)!.status === 'pending') await w.ownerSays(w.alex, 'no');
+    }
     expect((await approvalsOf(w, w.alex)).filter((a) => a.kind === 'a2a_release').map((a) => a.status).every((s) => s === 'denied')).toBe(true);
 
     // The greedy Brain really had the private data: Alex's own thread shows it (his prompts, its reply).

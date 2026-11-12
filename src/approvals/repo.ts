@@ -24,6 +24,9 @@ export interface NewApproval {
   groupId: string | null;
   expiresAt: Date;
   idempotencyKey: string | null;
+  /** Requested inside a Brain turn (I19): held (not delivered) until then; the turn delivers it. */
+  holdUntil: Date | null;
+  turnMessageId: string | null;
 }
 
 export function approvalsRepo(db: Queryable, clock: Clock) {
@@ -40,18 +43,36 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
       const ref = counter.rows[0]!.last_ref;
       const res = await db.query<ApprovalRow>(
         `INSERT INTO approvals (id, agent_id, ref, kind, payload, prompt, status, group_id, idempotency_key, created_at, expires_at,
-           created_after_message_seq, created_after_arrival_seq)
+           created_after_message_seq, created_after_arrival_seq, hold_until, turn_message_id)
          VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, $9, $10,
-           (SELECT COALESCE(max(seq), 0) FROM messages WHERE agent_id = $2), ${ARRIVAL_MARK}) RETURNING ${COLUMNS}`,
-        [randomUUID(), a.agentId, ref, a.kind, JSON.stringify(a.payload), a.prompt(ref), a.groupId, a.idempotencyKey, clock.now(), a.expiresAt],
+           (SELECT COALESCE(max(seq), 0) FROM messages WHERE agent_id = $2), ${ARRIVAL_MARK}, $11, $12) RETURNING ${COLUMNS}`,
+        [
+          randomUUID(),
+          a.agentId,
+          ref,
+          a.kind,
+          JSON.stringify(a.payload),
+          a.prompt(ref),
+          a.groupId,
+          a.idempotencyKey,
+          clock.now(),
+          a.expiresAt,
+          a.holdUntil,
+          a.turnMessageId,
+        ],
       );
       return res.rows[0]!;
     },
     get: (id: string) => one(`SELECT ${COLUMNS} FROM approvals WHERE id = $1`, [id]),
     byKey: (agentId: string, key: string) => one(`SELECT ${COLUMNS} FROM approvals WHERE agent_id = $1 AND idempotency_key = $2`, [agentId, key]),
     byRef: (agentId: string, ref: number) => one(`SELECT ${COLUMNS} FROM approvals WHERE agent_id = $1 AND ref = $2`, [agentId, ref]),
+    /** The approval whose genuine delivery (any of them: first, re-prompt, which-one) is this message (I19). */
     byPromptMessage: (agentId: string, transportMessageId: string) =>
-      one(`SELECT ${COLUMNS} FROM approvals WHERE agent_id = $1 AND prompt_transport_message_id = $2`, [agentId, transportMessageId]),
+      one(
+        `SELECT ${A_COLUMNS} FROM approvals a JOIN approval_deliveries d ON d.approval_id = a.id
+         WHERE d.agent_id = $1 AND a.agent_id = $1 AND d.transport_message_id = $2`,
+        [agentId, transportMessageId],
+      ),
     resolvedBy: (agentId: string, messageId: string) =>
       one(`SELECT ${COLUMNS} FROM approvals WHERE agent_id = $1 AND resolved_by_message_id = $2 ORDER BY seq LIMIT 1`, [agentId, messageId]),
     /** Pending and not past expires_at (an approval past it is closed even before the sweep marks it). */
@@ -68,6 +89,7 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
      * was stored, and before the message's inbound event ARRIVED (ingest), so a "yes"
      * queued in the lane behind the Brain turn that created the prompt does not count
      * either. A "yes" typed, queued or retried before a prompt went out never answers it.
+     * Fails closed: a message whose arrival is unknown answers nothing implicitly.
      */
     async listAnswerable(agentId: string, messageId: string): Promise<ApprovalRow[]> {
       const res = await db.query<ApprovalRow>(
@@ -79,7 +101,7 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
                AND p.agent_id = a.agent_id AND p.thread = 'owner' AND p.direction = 'out'
                AND p.transport_message_id = a.prompt_transport_message_id AND p.seq < m.seq
                AND a.prompt_sent_after_arrival_seq IS NOT NULL
-               AND COALESCE(${ARRIVAL_OF_M} > a.prompt_sent_after_arrival_seq, true))
+               AND COALESCE(${ARRIVAL_OF_M} > a.prompt_sent_after_arrival_seq, false))
          ORDER BY a.seq`,
         [agentId, messageId, clock.now()],
       );
@@ -88,24 +110,40 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
     /**
      * Whether the approval already existed when message `messageId` was written: created
      * before the message was stored AND before its inbound event arrived (a "yes 1" queued
-     * in the lane before #1 existed names something else).
+     * in the lane before #1 existed names something else). Fails closed when the arrival is unknown.
      */
     async existedBefore(approvalId: string, messageId: string): Promise<boolean> {
       const res = await db.query(
         `SELECT 1 FROM approvals a JOIN messages m ON m.id = $2 AND m.agent_id = a.agent_id
          WHERE a.id = $1 AND m.seq > a.created_after_message_seq
-           AND COALESCE(${ARRIVAL_OF_M} > a.created_after_arrival_seq, true)`,
+           AND COALESCE(${ARRIVAL_OF_M} > a.created_after_arrival_seq, false)`,
         [approvalId, messageId],
       );
       return res.rows.length > 0;
     },
+    /** Unsent pending prompts, except those a Brain turn still holds (hold_until in the future). */
     async listUnsent(agentId: string): Promise<ApprovalRow[]> {
       const res = await db.query<ApprovalRow>(
         `SELECT ${COLUMNS} FROM approvals
-         WHERE agent_id = $1 AND status = 'pending' AND expires_at > $2 AND prompt_transport_message_id IS NULL ORDER BY seq`,
+         WHERE agent_id = $1 AND status = 'pending' AND expires_at > $2 AND prompt_transport_message_id IS NULL
+           AND (hold_until IS NULL OR hold_until <= $2) ORDER BY seq`,
         [agentId, clock.now()],
       );
       return res.rows;
+    },
+    /** The unsent pending prompts requested in the Brain turn of `messageId`, in creation order (hold ignored). */
+    async listTurnUnsent(agentId: string, messageId: string): Promise<ApprovalRow[]> {
+      const res = await db.query<ApprovalRow>(
+        `SELECT ${COLUMNS} FROM approvals
+         WHERE agent_id = $1 AND turn_message_id = $2 AND status = 'pending' AND expires_at > $3 AND prompt_transport_message_id IS NULL
+         ORDER BY seq`,
+        [agentId, messageId, clock.now()],
+      );
+      return res.rows;
+    },
+    /** The turn is over: its approvals are no longer held (a suppressed one is sent on resume). */
+    async releaseTurn(agentId: string, messageId: string): Promise<void> {
+      await db.query('UPDATE approvals SET hold_until = NULL WHERE agent_id = $1 AND turn_message_id = $2 AND hold_until IS NOT NULL', [agentId, messageId]);
     },
     /**
      * Claims the right to send a prompt: one atomic UPDATE, so of any concurrent senders
@@ -125,13 +163,15 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
     async releaseSend(id: string): Promise<void> {
       await db.query('UPDATE approvals SET prompt_sending_until = NULL WHERE id = $1 AND prompt_transport_message_id IS NULL', [id]);
     },
-    async markSent(id: string, transportMessageId: string): Promise<void> {
-      await db.query(
+    /** Records the first delivery; returns false if one was recorded already. Call inside a transaction with recordFirst. */
+    async markSent(id: string, transportMessageId: string): Promise<boolean> {
+      const res = await db.query(
         `UPDATE approvals SET prompt_transport_message_id = $2, prompt_sending_until = NULL,
            prompt_sent_after_arrival_seq = ${ARRIVAL_MARK}
          WHERE id = $1 AND prompt_transport_message_id IS NULL`,
         [id, transportMessageId],
       );
+      return res.rowCount === 1;
     },
     /**
      * The one resolution statement: pending → approved/denied, atomically. Returns null when

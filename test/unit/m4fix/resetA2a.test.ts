@@ -42,7 +42,10 @@ describe('a2a after pairing:reissue --reset', () => {
 
     await w.strangerSays(w.sam, NEW, `/start ${code}`);
     expect(w.lastTo(NEW)).toBe(OWNER_TEXT.paired);
+    // The new chat never saw the prompt (it went to the old chat): shown again first (I19).
     await w.ownerSays({ ...w.sam, address: NEW }, 'yes 1');
+    expect(w.lastTo(NEW)).toMatch(/^Just to be sure: #1 With Alex: /);
+    await w.ownerSays({ ...w.sam, address: NEW }, 'yes');
     expect(w.lastTo(NEW)).toBe('Booked: “Dinner” — Fri Nov 13, 7:00–8:30 PM.');
     expect(w.lastTo(w.alex.address)).toBe('Booked: “Dinner” — Fri Nov 13, 7:00–8:30 PM.');
     expect(w.textsTo(w.sam.address).filter((t) => t.startsWith('Booked'))).toEqual([]);

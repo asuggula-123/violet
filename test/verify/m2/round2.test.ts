@@ -37,8 +37,9 @@ describe('M2 round 2: approvals', () => {
       return send(msg);
     };
     await w.ownerSays(w.alex, 'yes');
-    expect(prompts()).toHaveLength(1);
+    expect(prompts()).toHaveLength(0); // I19: held until the turn's reply is out
     await w.advance({ minutes: 5 }); // job retry
+    expect(prompts()).toHaveLength(1);
     // The owner never answered the prompt: their "yes" predates it.
     expect(w.calendar.writes).toEqual([]);
     const [a] = await w.app.approvals!.listPending(w.alex.agent.id);

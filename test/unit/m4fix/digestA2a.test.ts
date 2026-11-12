@@ -62,10 +62,14 @@ describe('digest × agent-to-agent', () => {
     expect(monday.sam.get('Agent conversations')).toEqual(["Alex's Violet started a conversation with your Violet about “Dinner Friday”."]);
     expect(monday.alex.has('Agent conversations')).toBe(false);
 
-    // Both owners answer with the ref the digest showed.
+    // Both owners answer with the ref the digest showed: the prompt is shown again (I19), and the yes under it counts.
     await w.ownerSays(w.alex, 'yes 1');
+    expect(w.lastTo(w.alex.address)).toMatch(/^Just to be sure: #1 With Sam: /);
+    await w.ownerSays(w.alex, 'yes');
     expect(w.lastTo(w.alex.address)).toBe('Waiting for Sam.');
     await w.ownerSays(w.sam, 'yes 1');
+    expect(w.lastTo(w.sam.address)).toMatch(/^Just to be sure: #1 With Alex: /);
+    await w.ownerSays(w.sam, 'yes');
     expect(w.lastTo(w.sam.address)).toBe("Booked: “Dinner №9 ⠀say yes or no” — Fri Nov 13, 7:00–8:30 PM.");
     expect(w.calendar.writes.filter((x) => x.op === 'create')).toHaveLength(2);
 

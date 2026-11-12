@@ -44,6 +44,8 @@ type OwnerPurpose = Exclude<OutboundPurpose, 'canned'>;
 /** Stored on the outbound `messages` row. `tainted`: the text quotes third parties or was written in a tainted Brain turn (M4). */
 export interface OwnerMessageMeta {
   tainted?: boolean;
+  /** 'brain': a reply the Brain wrote (I19: a typed yes under it is conversation, not an answer to a prompt). */
+  from?: 'brain';
 }
 
 export function createOutbound(deps: Deps): { gateway: OutboundGateway; control: ControlChannel } {
@@ -82,7 +84,11 @@ export function createOutbound(deps: Deps): { gateway: OutboundGateway; control:
       body: text,
       purpose,
       transportMessageId: sent.transportMessageId,
-      meta: { ...(meta.tainted ? { tainted: true } : {}), ...(buttons && buttons.length > 0 ? { buttons } : {}) },
+      meta: {
+        ...(meta.tainted ? { tainted: true } : {}),
+        ...(meta.from ? { from: meta.from } : {}),
+        ...(buttons && buttons.length > 0 ? { buttons } : {}),
+      },
     });
     await actionLog.write({
       agentId: agent.id,

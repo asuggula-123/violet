@@ -77,8 +77,11 @@ describe('digest wiring (M2 × M5)', () => {
     expect(await w.actions({ action: 'digest.sent' })).toHaveLength(1);
     // Two Brain turns of two model steps each, all before the digest.
     expect(brainCalls(w, alex)).toHaveLength(4);
-    // The waiting #ref is answerable from the digest.
+    // The waiting #ref is answerable from the digest: under the digest it is not under the
+    // prompt, so the prompt is shown again first (I19); the yes under it books.
     await w.ownerSays(alex, 'yes #2');
+    expect(w.lastTo(alex.address)).toBe('Just to be sure: #2 Lunch — Thu Nov 12, 12:00–1:00 PM. Book it? Reply yes or no.');
+    await w.ownerSays(alex, 'yes');
     expect(w.lastTo(alex.address)).toBe('Booked: Lunch — Thu Nov 12, 12:00–1:00 PM.');
   });
 
@@ -114,7 +117,8 @@ describe('digest wiring (M2 × M5)', () => {
     await w.ownerSays(w.alex, 'yes #1');
     await svc.calendar.executeApproved(a.id);
     await svc.calendar.executeApproved(a.id);
-    await w.ownerSays(w.alex, 'no #2');
+    await w.ownerSays(w.alex, 'no #2'); // under the booking line, not the prompt: shown again (I19)
+    await w.ownerSays(w.alex, 'no');
     expect((await svc.get(b.id))!.status).toBe('denied');
     const booked = (await w.app.repos.flags.listByAgent(w.alex.agent.id)).filter((f) => f.kind === 'booked');
     expect(booked.map((f) => [f.text, f.urgency, f.status, f.dedupe_key])).toEqual([

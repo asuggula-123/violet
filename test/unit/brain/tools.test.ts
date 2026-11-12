@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CALENDAR_TOOL_TEXT } from '../../../src/brain/tools/calendar.js';
 import type { BrainToolCtx } from '../../../src/brain/types.js';
 import { createTestWorld, type Persona, type TestWorld } from '../../helpers/world.js';
 
@@ -90,8 +91,8 @@ describe('Brain tools', () => {
   it('request_calendar_event creates an approval and sends the code-rendered prompt; it books nothing', async () => {
     const c = ctx();
     const out = await call('request_calendar_event', { title: 'Dinner', start: fri(19), end: fri(20, 30), location: 'Luigi' }, c);
-    expect(out).toContain('#1 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it?');
-    expect(out).toContain('Nothing is booked unless they reply yes');
+    // I19: a fixed text, true whatever the model does next (outside a Brain turn, as here, the prompt goes out at once).
+    expect(out).toBe(CALENDAR_TOOL_TEXT.requested);
     expect(w.textsTo(w.alex.address)).toEqual(['#1 Dinner — Fri Nov 13, 7:00–8:30 PM. Book it? Reply yes or no.']);
     expect(w.calendar.writes).toEqual([]);
     const [a] = await w.app.approvals!.listPending(w.alex.agent.id);

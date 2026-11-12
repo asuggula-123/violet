@@ -87,7 +87,10 @@ export async function buildApp(deps: AppDeps, modules: readonly Module[], opts: 
     flags,
     router,
 
-    async ingest(msg) {
+    async ingest(input) {
+      // I19: a test transport numbers an inbound message that arrives without its chat number.
+      const number = input.chatMessageId === undefined ? transport.numberInbound?.(input) : undefined;
+      const msg: InboundMessage = number ? { ...input, chatMessageId: number } : input;
       // I18: the event row and its job commit together. If the enqueue fails, the
       // insert rolls back too, so the transport's redelivery is not taken for a duplicate.
       const event = await db.tx(async (tx) => {

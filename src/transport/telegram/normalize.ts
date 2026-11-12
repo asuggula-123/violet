@@ -131,6 +131,8 @@ export function normalizeUpdate(botId: string, update: TelegramUpdate, receivedA
       ...(fromName ? { fromName } : {}),
       ...(m.text !== undefined && !notTypedBySender(m) ? { kind: 'text' as const, text: storable(m.text) } : { kind: 'unsupported' as const, text: '' }),
       ...(reply ? { replyToTransportMessageId: messageRef(reply.chat?.id ?? m.chat.id, reply.message_id) } : {}),
+      // I19: this message's number in its chat (outbound ids have the same shape).
+      chatMessageId: messageRef(m.chat.id, m.message_id),
     },
   };
 }
