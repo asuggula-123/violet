@@ -17,5 +17,9 @@ export function ownersRepo(db: Queryable, clock: Clock) {
       const res = await db.query<OwnerRow>('SELECT * FROM owners WHERE id = $1', [id]);
       return res.rows[0] ?? null;
     },
+    async inHousehold(householdId: string): Promise<OwnerRow[]> {
+      const res = await db.query<OwnerRow>('SELECT * FROM owners WHERE household_id = $1 ORDER BY created_at, id', [householdId]);
+      return res.rows;
+    },
   };
 }

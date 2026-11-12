@@ -2,9 +2,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it } from 'vitest';
 import { AnthropicLlm, toLlmError, type CreateMessage } from '../../../src/llm/anthropic.js';
 import { LlmError, UnconfiguredLlm } from '../../../src/llm/errors.js';
+import { DEFAULT_MODEL } from '../../../src/config.js';
 import type { LlmRequest } from '../../../src/llm/types.js';
 
-const models = { brain: 'claude-opus-5-5', envoy: 'envoy-model-x' };
+const models = { brain: DEFAULT_MODEL, envoy: 'envoy-model-x' };
 
 function request(over: Partial<LlmRequest> = {}): LlmRequest {
   return {
@@ -30,7 +31,7 @@ function apiMessage(over: Record<string, unknown> = {}) {
     id: 'msg_1',
     type: 'message',
     role: 'assistant',
-    model: 'claude-opus-5-5',
+    model: DEFAULT_MODEL,
     content: [
       { type: 'thinking', thinking: '', signature: 'sig2' },
       { type: 'text', text: 'Hello' },
@@ -58,7 +59,7 @@ describe('AnthropicLlm', () => {
     await llm.complete(request());
     await llm.complete(request({ meta: { agentId: 'a', mind: 'envoy' } }));
     const [brain, envoy] = seen;
-    expect(brain!.model).toBe('claude-opus-5-5');
+    expect(brain!.model).toBe(DEFAULT_MODEL);
     expect(envoy!.model).toBe('envoy-model-x');
     expect(brain!.max_tokens).toBe(1234);
     expect(brain!.system).toEqual([
@@ -119,7 +120,7 @@ describe('AnthropicLlm', () => {
     expect(call.url).toContain('/v1/messages');
     expect(call.headers.get('authorization') ?? call.headers.get('x-api-key')).toContain('sk-test-not-real');
     expect(call.headers.get('anthropic-beta')).toContain('server-side-fallback-2026-07-01');
-    expect(call.body).toMatchObject({ model: 'claude-opus-5-5', max_tokens: 1234, fallbacks: 'default' });
+    expect(call.body).toMatchObject({ model: DEFAULT_MODEL, max_tokens: 1234, fallbacks: 'default' });
     expect(call.body).not.toHaveProperty('betas');
     expect(call.body).not.toHaveProperty('meta');
     expect(JSON.stringify(call.body)).not.toContain('sk-test-not-real');
@@ -165,7 +166,7 @@ const live = process.env.ANTHROPIC_API_KEY && process.env.RUN_LIVE_LLM === '1';
 
 describe.skipIf(!live)('AnthropicLlm live smoke (ANTHROPIC_API_KEY + RUN_LIVE_LLM=1)', () => {
   it('answers a trivial prompt', async () => {
-    const model = process.env.VIOLET_MODEL || 'claude-opus-5-5';
+    const model = process.env.VIOLET_MODEL || DEFAULT_MODEL;
     const llm = new AnthropicLlm({ apiKey: process.env.ANTHROPIC_API_KEY!, models: { brain: model, envoy: model } });
     const res = await llm.complete({
       system: 'Reply with the single word: pong',

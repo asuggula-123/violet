@@ -91,7 +91,7 @@ describe('CalendarWriter (I6)', () => {
     };
     w.app.approvals!.registerKind('pair', {
       schema: z.object({}),
-      render: () => 'Two events?',
+      render: () => 'One and Two?', // the prompt shows every booked title (CalendarWriter checks it)
       calendarEvents: () => [
         { title: 'One', start: new Date(dinner.start), end: new Date(dinner.end) },
         { title: 'Two', start: new Date(dinner.start), end: new Date(dinner.end) },

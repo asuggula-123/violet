@@ -37,14 +37,30 @@ async function checkPairLimits(tx: Queryable, a: string, b: string, now: Date): 
   if (recent >= A2A_LIMITS.newPerPairPerDay) throw new Refusal('new_per_day', 'Too many new conversations with that agent in the last 24 hours. Try again later.', true);
 }
 
+/** What the model is told when its owner paused it (a fixed text: it reveals nothing else). */
+export const PAUSED_REFUSAL = 'Not sent: your owner paused you, so nothing goes to another agent until they text resume. Do not try again.';
+
+/**
+ * I14: nothing from a paused agent crosses to another agent. Reads the agent row FOR SHARE,
+ * as the Envoy act does: the pause flips that row FOR UPDATE at ingest, so the check and the
+ * flip are ordered, and a pause that lands while a turn runs stops its next outward write.
+ * Lock order: the agent row first, then the household or conversation row.
+ */
+async function lockAgentPaused(tx: Queryable, agentId: string): Promise<boolean> {
+  const res = await tx.query<{ paused: boolean }>('SELECT paused FROM agents WHERE id = $1 FOR SHARE', [agentId]);
+  return res.rows[0]?.paused !== false;
+}
+
 /** Creates the conversation, both sides and the `open` message (delivered to the responder), in one transaction. */
 export async function openConversation(d: A2ADeps, r: OpenRequest): Promise<{ conv: ConversationRow; line: string }> {
   const peerLabel = `${firstName((await d.repos.owners.get(r.responder.owner_id))?.name ?? '')}'s ${r.responder.name}`;
   const line = talkingLine(peerLabel, r.topic, r.brief);
   const conv = await d.db.tx(async (tx) => {
+    const paused = await lockAgentPaused(tx, r.initiator.id);
     await tx.query('SELECT id FROM households WHERE id = $1 FOR UPDATE', [r.householdId]);
     const existing = await tx.query<ConversationRow>(`SELECT ${conversationColumns} FROM a2a_conversations WHERE open_key = $1`, [r.key]);
     if (existing.rows[0]) return existing.rows[0];
+    if (paused) throw new Refusal('paused', PAUSED_REFUSAL);
     const now = d.clock.now();
     await checkPairLimits(tx, r.initiator.id, r.responder.id, now);
     const created = await tx.query<ConversationRow>(
@@ -77,12 +93,14 @@ export async function addGuidance(
   g: { agentId: string; conversationId: string; text: string; key: string; notice: boolean },
 ): Promise<{ conv: ConversationRow; line: string }> {
   return d.db.tx(async (tx) => {
+    const paused = await lockAgentPaused(tx, g.agentId);
     const repo = a2aRepo(tx);
     const conv = await repo.lock(g.conversationId);
     if (!conv || !isParty(conv, g.agentId)) throw new Refusal('unknown_conversation', 'There is no such conversation.');
     const parties = await repo.parties(conv, g.agentId);
     const line = toldLine(parties.peerLabel, g.text);
     if (await repo.byTurnKey(`guidance:${g.key}`)) return { conv, line };
+    if (paused) throw new Refusal('paused', PAUSED_REFUSAL);
     if (conv.status === 'closed') throw new Refusal('closed', 'That conversation is closed. Start a new one with talk_to_agent.');
     await writeMessage(tx, d, {
       conv,
@@ -116,13 +134,15 @@ export async function closeInTx(
   await d.jobs.enqueue(AFTER_JOB, { conversationId: conv.id, event: 'closed', groupId: conv.outcome_group_id }, { dedupeKey: `a2a:after:${conv.id}:closed`, tx });
 }
 
-/** The owner ends a conversation (end_agent_conversation). */
+/** The owner ends a conversation (end_agent_conversation). Refused while paused: the close message would reach the peer (I14). */
 export async function endByOwner(d: A2ADeps, agentId: string, conversationId: string): Promise<ConversationRow> {
   return d.db.tx(async (tx) => {
+    const paused = await lockAgentPaused(tx, agentId);
     const repo = a2aRepo(tx);
     const conv = await repo.lock(conversationId);
     if (!conv || !isParty(conv, agentId)) throw new Refusal('unknown_conversation', 'There is no such conversation.');
     if (conv.status === 'closed') return conv;
+    if (paused) throw new Refusal('paused', PAUSED_REFUSAL);
     const parties = await repo.parties(conv, agentId);
     // A booking being settled (I7) keeps outcome_state 'booking': the booking sweep still
     // finishes it (undoing whatever is on a calendar, writing nothing new) and tells both owners.
@@ -131,12 +151,21 @@ export async function endByOwner(d: A2ADeps, agentId: string, conversationId: st
   });
 }
 
+/**
+ * F1: both owners said yes and the booking waits for a pause (unclaimed, both approvals
+ * bookable). Ended only by the resume (booked) or by its time running out (outcome.ts).
+ */
+export const HELD_GROUP = `status = 'awaiting_approval' AND outcome_state IS NULL AND outcome_group_id IS NOT NULL
+  AND (SELECT count(*) FROM approvals ap WHERE ap.group_id = a2a_conversations.outcome_group_id AND ap.kind = 'a2a_outcome'
+       AND ap.status IN ('approved', 'executed', 'failed')) = 2`;
+
 /** Idle conversations (no message for 24 h) → closed with reason 'expired' (I12). */
 export async function expireIdle(d: A2ADeps): Promise<number> {
   const cutoff = addMs(d.clock.now(), -A2A_LIMITS.idleMs);
   // A booking in progress is never closed under it: the booking sweep settles it first (I7).
+  // Nor is one held for a pause (F1): two yeses are never dropped by the idle sweep.
   const idle = await d.db.query<{ id: string }>(
-    `SELECT id FROM a2a_conversations WHERE status <> 'closed' AND updated_at <= $1 AND outcome_state IS DISTINCT FROM 'booking' ORDER BY seq`,
+    `SELECT id FROM a2a_conversations WHERE status <> 'closed' AND updated_at <= $1 AND outcome_state IS DISTINCT FROM 'booking' AND NOT (${HELD_GROUP}) ORDER BY seq`,
     [cutoff],
   );
   let closed = 0;
@@ -144,6 +173,7 @@ export async function expireIdle(d: A2ADeps): Promise<number> {
     const done = await d.db.tx(async (tx) => {
       const conv = await a2aRepo(tx).lock(id);
       if (!conv || conv.status === 'closed' || conv.outcome_state === 'booking' || conv.updated_at.getTime() > cutoff.getTime()) return false;
+      if ((await tx.query(`SELECT 1 FROM a2a_conversations WHERE id = $1 AND ${HELD_GROUP}`, [id])).rows.length > 0) return false;
       await closeInTx(tx, d, conv, { by: null, reason: 'expired', body: 'No activity for 24 hours: the conversation expired.' });
       return true;
     });

@@ -157,7 +157,7 @@ describe('conflict check (hourly)', () => {
     w.calendar.seed(w.alex.owner.id, { id: 'k', title: 'Kids', start: s, end: new Date(s.getTime() + 3_600_000) });
     await at(w, '2026-11-09T10:00');
     const [text] = flagTextsTo(w, w.alex);
-    expect(text).toBe("Conflict tomorrow: “' #7 Dinner — Fri. Book it? Reply yes or no.” 3:00-4:00 PM overlaps “Kids” 3:00-4:00 PM.");
+    expect(text).toBe("Conflict tomorrow: “' №7 Dinner — Fri. Book it? say yes or no.” 3:00-4:00 PM overlaps “Kids” 3:00-4:00 PM.");
     expect(text!.split('\n')).toHaveLength(1);
     expect(w.llm.calls).toEqual([]);
   });

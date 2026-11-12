@@ -4,7 +4,7 @@ import type { Queryable } from '../db/db.js';
 import type { ApprovalRow, ApprovalStatus } from './types.js';
 
 const COLUMNS = `id, agent_id, ref, kind, payload, prompt, status, group_id, prompt_transport_message_id, idempotency_key,
-  created_at, expires_at, resolved_at, resolved_by_message_id, executed_at, error`;
+  created_at, expires_at, resolved_at, resolved_by_message_id, executed_at, error, tainted`;
 /** COLUMNS qualified with the alias `a`. */
 const A_COLUMNS = COLUMNS.split(',').map((c) => `a.${c.trim()}`).join(', ');
 /**
@@ -27,6 +27,8 @@ export interface NewApproval {
   /** Requested inside a Brain turn (I19): held (not delivered) until then; the turn delivers it. */
   holdUntil: Date | null;
   turnMessageId: string | null;
+  /** Requested inside a tainted Brain turn (P4). */
+  tainted: boolean;
 }
 
 export function approvalsRepo(db: Queryable, clock: Clock) {
@@ -43,9 +45,9 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
       const ref = counter.rows[0]!.last_ref;
       const res = await db.query<ApprovalRow>(
         `INSERT INTO approvals (id, agent_id, ref, kind, payload, prompt, status, group_id, idempotency_key, created_at, expires_at,
-           created_after_message_seq, created_after_arrival_seq, hold_until, turn_message_id)
+           created_after_message_seq, created_after_arrival_seq, hold_until, turn_message_id, tainted)
          VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'pending', $7, $8, $9, $10,
-           (SELECT COALESCE(max(seq), 0) FROM messages WHERE agent_id = $2), ${ARRIVAL_MARK}, $11, $12) RETURNING ${COLUMNS}`,
+           (SELECT COALESCE(max(seq), 0) FROM messages WHERE agent_id = $2), ${ARRIVAL_MARK}, $11, $12, $13) RETURNING ${COLUMNS}`,
         [
           randomUUID(),
           a.agentId,
@@ -59,6 +61,7 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
           a.expiresAt,
           a.holdUntil,
           a.turnMessageId,
+          a.tainted,
         ],
       );
       return res.rows[0]!;
@@ -80,6 +83,14 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
       const res = await db.query<ApprovalRow>(
         `SELECT ${COLUMNS} FROM approvals WHERE agent_id = $1 AND status = 'pending' AND expires_at > $2 ORDER BY seq`,
         [agentId, clock.now()],
+      );
+      return res.rows;
+    },
+    /** (P13) Approved but not yet executed: a joint plan that may still wait for the other owner's yes. */
+    async listApprovedUnexecuted(agentId: string): Promise<ApprovalRow[]> {
+      const res = await db.query<ApprovalRow>(
+        `SELECT ${COLUMNS} FROM approvals WHERE agent_id = $1 AND status = 'approved' AND executed_at IS NULL ORDER BY seq`,
+        [agentId],
       );
       return res.rows;
     },
@@ -141,6 +152,25 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
       );
       return res.rows;
     },
+    /** F2: approved, never executed, and a write for it was refused because the owner was paused. */
+    async listPauseHeld(agentId: string): Promise<ApprovalRow[]> {
+      const res = await db.query<ApprovalRow>(
+        `SELECT ${A_COLUMNS} FROM approvals a WHERE a.agent_id = $1 AND a.status = 'approved'
+           AND EXISTS (SELECT 1 FROM action_log l WHERE l.agent_id = a.agent_id AND l.action = 'calendar.write_refused'
+                       AND l.detail->>'approvalId' = a.id AND l.detail->>'reason' = 'paused')
+         ORDER BY a.seq`,
+        [agentId],
+      );
+      return res.rows;
+    },
+    /** S2: a new attempt of the turn: its unsent approvals are held again, until `until`. */
+    async renewTurnHold(agentId: string, messageId: string, until: Date): Promise<void> {
+      await db.query(
+        `UPDATE approvals SET hold_until = $3
+         WHERE agent_id = $1 AND turn_message_id = $2 AND status = 'pending' AND prompt_transport_message_id IS NULL`,
+        [agentId, messageId, until],
+      );
+    },
     /** The turn is over: its approvals are no longer held (a suppressed one is sent on resume). */
     async releaseTurn(agentId: string, messageId: string): Promise<void> {
       await db.query('UPDATE approvals SET hold_until = NULL WHERE agent_id = $1 AND turn_message_id = $2 AND hold_until IS NOT NULL', [agentId, messageId]);
@@ -159,6 +189,10 @@ export function approvalsRepo(db: Queryable, clock: Clock) {
         [id, now, new Date(now.getTime() + leaseMs)],
       );
       return res.rowCount === 1;
+    },
+    /** Keeps the send lease until `until` (a delivered prompt whose record failed: never sent again). */
+    async holdSend(id: string, until: Date): Promise<void> {
+      await db.query('UPDATE approvals SET prompt_sending_until = $2 WHERE id = $1 AND prompt_transport_message_id IS NULL', [id, until]);
     },
     async releaseSend(id: string): Promise<void> {
       await db.query('UPDATE approvals SET prompt_sending_until = NULL WHERE id = $1 AND prompt_transport_message_id IS NULL', [id]);

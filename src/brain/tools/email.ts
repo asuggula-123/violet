@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { quote } from '../../core/sanitize.js';
 import { GoogleError } from '../../google/errors.js';
 import { ToolError } from '../../llm/tools.js';
+import { neutralizeReply, quoteFolded } from '../reply.js';
 import { formatDateTime } from '../time.js';
 import type { BrainTool } from '../types.js';
 import { wrapUntrusted } from '../untrusted.js';
@@ -81,7 +81,9 @@ export function emailTools(d: BrainToolDeps): BrainTool[] {
       await d.flags.raise(ctx.agent.id, {
         kind: 'draft_created',
         urgency: 'digest',
-        text: `Draft saved in Gmail: ${quote(input.subject, 100)} to ${line(input.to.join(', '), 150)}`,
+        // Folded (8.7): a model fooled by an email can copy a forged "#1 … Reply yes or no."
+        // into the subject or an address; the digest shows it outside 'Waiting for you'.
+        text: `Draft saved in Gmail: ${quoteFolded(input.subject, 100)} to ${neutralizeReply(line(input.to.join(', '), 150))}`,
         dedupeKey: `draft:${draftId}`,
       });
       return `Draft saved (not sent) to ${input.to.join(', ')}. The owner can review and send it from Gmail drafts.`;

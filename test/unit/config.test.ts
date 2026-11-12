@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { devEndpointsEnabled, parseConfig } from '../../src/config.js';
+import { DEFAULT_MODEL, devEndpointsEnabled, parseConfig } from '../../src/config.js';
 
 describe('config', () => {
   it('has safe defaults with an empty environment', () => {
     const c = parseConfig({});
     expect(c).toMatchObject({ NODE_ENV: 'development', PORT: 8080, TRANSPORT: 'fake', TELEGRAM_MODE: 'webhook' });
     expect(c.DATABASE_URL).toBeUndefined();
-    expect(c.VIOLET_MODEL).toBe('claude-opus-5-5');
+    expect(c.VIOLET_MODEL).toBe(DEFAULT_MODEL);
     expect(c.VIOLET_ENVOY_MODEL).toBe(c.VIOLET_MODEL);
   });
 

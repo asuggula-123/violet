@@ -40,7 +40,7 @@ export function createActionLog(db: Queryable, clock: Clock): ActionLog {
         entry.agentId ?? null,
         entry.actor,
         entry.action,
-        JSON.stringify(entry.detail ?? {}),
+        JSON.stringify(jsonbSafe(entry.detail ?? {})),
       ]);
     },
     async list(filter = {}) {
@@ -53,4 +53,19 @@ export function createActionLog(db: Queryable, clock: Clock): ActionLog {
       return res.rows;
     },
   };
+}
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * jsonb rejects U+0000 and lone surrogates: a detail that holds one (say, a tool name the model
+ * wrote) would make the row fail and the turn retry until dead. Strings and keys are made storable.
+ */
+function jsonbSafe(v: unknown): unknown {
+  if (typeof v === 'string') return v.replaceAll('\u0000', '').replace(LONE_SURROGATE, '\uFFFD');
+  if (Array.isArray(v)) return v.map(jsonbSafe);
+  if (v !== null && typeof v === 'object' && !(v instanceof Date) && Object.getPrototypeOf(v) === Object.prototype) {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [jsonbSafe(k) as string, jsonbSafe(x)]));
+  }
+  return v;
 }

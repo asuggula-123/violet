@@ -33,7 +33,11 @@ export const approvalsModule: Module = {
     service.registerKind('calendar_event', calendarEventKind);
     app.approvals = service;
     app.router.hooks.ownerInterceptors.push(createResolver(app, service));
-    app.router.hooks.onResume.push((agentId) => service.sendUnsent(agentId));
+    // F2: held solo bookings first, then the unsent prompts last (S3; the a2a hooks run before these).
+    app.router.hooks.onResume.push(async (agentId) => {
+      await service.resumeHeldWrites(agentId);
+      await service.sendUnsent(agentId);
+    });
     app.digest?.addSection(waitingSection(service));
     // Paused agents are skipped by the scheduler (I14): nothing expires or is sent while paused.
     app.scheduler.registerPerAgent('approvals.sweep', APPROVAL_SWEEP_MS, async (agentId) => {

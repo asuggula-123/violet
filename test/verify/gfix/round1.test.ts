@@ -22,7 +22,7 @@ describe('verify gfix r1: pairing re-issue races', () => {
   async function unpaired(agentAddress = 'violet-new') {
     const created = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
-      name: 'Alex',
+      name: 'Robin', // Q8: one first name per household
       timezone: 'Europe/London',
       transport: 'fake',
       agentAddress,

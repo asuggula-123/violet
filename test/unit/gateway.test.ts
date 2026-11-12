@@ -66,7 +66,7 @@ describe('OutboundGateway (I4)', () => {
     const { createOwnerWithAgent } = await import('../../src/core/setup.js');
     const { agent } = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
-      name: 'Sam',
+      name: 'Robin', // Q8: one first name per household
       timezone: 'UTC',
       transport: 'fake',
       agentAddress: 'violet-unpaired',

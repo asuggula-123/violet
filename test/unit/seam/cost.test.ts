@@ -67,7 +67,7 @@ describe('seam: typed owner messages under I19 and I20', () => {
     expect(w.calendar.writes.filter((x) => x.op === 'create')).toHaveLength(4);
   });
 
-  it('two held releases from one turn, typed answers only: the request + 3 (yes 1, yes 2 shows #2 again, yes)', async () => {
+  it('two held releases from one turn, typed answers only: the request + 2 (yes 1, which shows #2 again; yes)', async () => {
     w = await createTestWorld();
     scriptEnvoy(w, w.sam, () => ['ok']);
     scriptEnvoy(w, w.alex, () => ['ok']);
@@ -76,12 +76,11 @@ describe('seam: typed owner messages under I19 and I20', () => {
     taintedTurn(w, w.alex, [tell('g', conv, 'Thursday works.'), talk('t', 'Saturday', SECRET)]);
     await w.ownerSays(w.alex, 'Tell Sam Thursday works, and about Saturday');
     await w.ownerSays(w.alex, 'yes 1');
-    await w.ownerSays(w.alex, 'yes 2');
     expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${OPEN_PROMPT(2, 'Saturday', SECRET)}`);
     expect(await statusByRef(w, w.alex, 2)).toBe('pending');
     await w.ownerSays(w.alex, 'yes');
-    expect([await statusByRef(w, w.alex, 1), await statusByRef(w, w.alex, 2)]).toEqual(['approved', 'approved']);
-    expect((await ownerMessages(w)).slice(before).map(([, t]) => t)).toEqual(['Tell Sam Thursday works, and about Saturday', 'yes 1', 'yes 2', 'yes']);
+    expect([await statusByRef(w, w.alex, 1), await statusByRef(w, w.alex, 2)]).toEqual(['executed', 'executed']);
+    expect((await ownerMessages(w)).slice(before).map(([, t]) => t)).toEqual(['Tell Sam Thursday works, and about Saturday', 'yes 1', 'yes']);
   });
 
   it('the demo story: Alex 4 (dinner, yes, pause, resume), Sam 3 (yes, the run request, yes to its words); reply above the prompt', async () => {

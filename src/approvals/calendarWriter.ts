@@ -15,8 +15,27 @@ export class CalendarWriteRefused extends Error {
   override readonly name = 'CalendarWriteRefused';
 }
 
+/**
+ * I14 (F2): the owner whose calendar is about to be written is paused. Thrown by the writer
+ * right before each write, and by a kind's guard. Nothing of the approval's group written yet:
+ * the approval stays `approved` (held for the resume); otherwise it fails as any refusal does.
+ */
+export class PausedWrite extends Error {
+  readonly ownerMessage = 'the owner paused the agent';
+}
+
 class PastEvent extends Error {
   readonly ownerMessage = 'the event has already started';
+}
+
+/** What you see is what gets booked: a text field the stored prompt never showed is not written. */
+class NotShown extends Error {
+  readonly ownerMessage = 'the question I asked did not show all of it, so please ask me again';
+}
+
+/** Every text field to be written appears verbatim in the prompt the owner answered (rows stored before the full-text prompts included). */
+function shownWhole(prompt: string, events: ReadonlyArray<{ title: string; location?: string; description?: string }>): boolean {
+  return events.every((ev) => [ev.title, ev.location, ev.description].every((t) => t === undefined || t === '' || prompt.includes(t)));
 }
 
 const DEFAULT_REASON = "the calendar didn't accept it";
@@ -51,6 +70,22 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
     return res.rows;
   }
 
+  /** I14, as the other pause checks: FOR SHARE, so it is ordered after a pause flip in progress. */
+  async function paused(agentId: string): Promise<boolean> {
+    const res = await db.query<{ paused: boolean }>('SELECT paused FROM agents WHERE id = $1 FOR SHARE', [agentId]);
+    return res.rows[0]?.paused !== false;
+  }
+
+  /** Whether any calendar write was ever recorded for this approval or another of its group. */
+  async function groupWritten(approval: ApprovalRow): Promise<boolean> {
+    const res = await db.query(
+      `SELECT 1 FROM calendar_writes w JOIN approvals a ON a.id = w.approval_id
+       WHERE a.id = $1 OR (a.group_id IS NOT NULL AND a.group_id = $2) LIMIT 1`,
+      [approval.id, approval.group_id],
+    );
+    return res.rows.length > 0;
+  }
+
   async function refuse(agentId: string | null, approvalId: string, reason: string): Promise<never> {
     await actionLog.write({ agentId, actor: 'system', action: 'calendar.write_refused', detail: { approvalId, reason } });
     throw new CalendarWriteRefused(`calendar write refused for approval ${approvalId}: ${reason}`);
@@ -67,7 +102,7 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
     const agent = await repos.agents.get(approval.agent_id);
     const owner = agent ? await repos.owners.get(agent.owner_id) : null;
     if (!agent || !owner) return;
-    const line = codeLine(kind.booked(kind.schema.parse(approval.payload), { timezone: owner.timezone }), BOOKED_LINE_MAX);
+    const line = codeLine(kind.booked(kind.schema.parse(approval.payload), { timezone: owner.timezone, now: clock.now() }), BOOKED_LINE_MAX);
     await flags.raise(agent.id, { kind: 'booked', urgency: 'digest', text: line, dedupeKey: `booked:${approval.id}` });
   }
 
@@ -97,9 +132,13 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
         // Never book something that has already started (an approval resolved just in
         // time can still reach this after the start).
         if (events.some((ev) => ev.start.getTime() <= clock.now().getTime())) throw new PastEvent();
+        if (!shownWhole(approval.prompt, events)) throw new NotShown();
         const eventIds: string[] = [];
         for (const [n, ev] of events.entries()) {
           const idempotencyKey = `approval:${approval.id}:${n}`;
+          // F2: a pause that landed since the guard stops the write. (A pause landing while the
+          // provider call is already in flight is not seen: that write goes through, 8.6.)
+          if (await paused(agent.id)) throw new PausedWrite();
           // I7: the intent is recorded first, so an event the provider made but whose
           // response was lost (or a crash before the id is stored) can still be undone by key.
           await db.query(
@@ -114,6 +153,11 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
         }
         result = { ok: true, eventIds };
       } catch (err) {
+        if (err instanceof PausedWrite && !(await groupWritten(approval))) {
+          // Nothing was written anywhere: held, still `approved`; the resume books it.
+          await actionLog.write({ agentId: agent.id, actor: 'system', action: 'calendar.write_refused', detail: { approvalId, reason: 'paused' } });
+          return { ok: false, reason: err.ownerMessage, held: true };
+        }
         log.warn({ approvalId, err: err instanceof Error ? err.message : String(err) }, 'calendar write failed');
         result = { ok: false, reason: ownerReason(err) };
         try {
@@ -155,7 +199,12 @@ export function createCalendarWriter(deps: Deps): CalendarWriter {
   return writer;
 }
 
+/**
+ * The owner-safe reason (`ownerMessage`: every typed Google error has one, P6), as a fragment
+ * for "I couldn't book #n: <reason>." (no final period).
+ */
 function ownerReason(err: unknown): string {
   const m = typeof err === 'object' && err !== null ? (err as { ownerMessage?: unknown }).ownerMessage : undefined;
-  return typeof m === 'string' && m.trim() !== '' ? m.slice(0, 200) : DEFAULT_REASON;
+  const reason = typeof m === 'string' ? m.trim().replace(/\.+$/, '') : '';
+  return reason !== '' ? reason.slice(0, 200) : DEFAULT_REASON;
 }

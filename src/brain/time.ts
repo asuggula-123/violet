@@ -100,3 +100,50 @@ export function formatRange(start: Date, end: Date, timeZone: string): string {
   if (a.meridiem === b.meridiem) return `${day}, ${a.text}–${b.text} ${b.meridiem}`;
   return `${day}, ${a.text} ${a.meridiem} – ${b.text} ${b.meridiem}`;
 }
+
+/** P3: an event may start at most this far ahead (request_calendar_event, the Envoy's propose/accept). */
+export const MAX_DAYS_AHEAD = 366;
+
+/** Whether `start` is within MAX_DAYS_AHEAD of `now`. */
+export function withinHorizon(start: Date, now: Date): boolean {
+  return start.getTime() <= now.getTime() + MAX_DAYS_AHEAD * 86_400_000;
+}
+
+/** Whole minutes only: the prompt shows times to the minute, so nothing finer may be booked or sent. */
+export function wholeMinute(d: Date): boolean {
+  return d.getTime() % 60_000 === 0;
+}
+
+/** The local wall time, to the minute (`2026-11-01T01:30`). */
+const wallMinute = (d: Date, tz: string) => isoInZone(d, tz).slice(0, 16);
+/** `-04:00` */
+const offsetOf = (d: Date, tz: string) => isoInZone(d, tz).slice(19);
+const yearOf = (d: Date, tz: string) => Number(isoInZone(d, tz).slice(0, 4));
+
+/**
+ * Whether another instant near `d` reads the same local wall time (the repeated hour when the
+ * clocks go back). Offset changes are at most two hours, so instants up to 2 h away are checked.
+ */
+export function ambiguousLocalTime(d: Date, tz: string): boolean {
+  // Fast path: the same offset 2 h before and after means no change near d, so no repeat.
+  const off = offsetOf(d, tz);
+  if (offsetOf(new Date(d.getTime() - 120 * 60_000), tz) === off && offsetOf(new Date(d.getTime() + 120 * 60_000), tz) === off) return false;
+  const wall = wallMinute(d, tz);
+  return [-120, -90, -60, -30, 30, 60, 90, 120].some((m) => wallMinute(new Date(d.getTime() + m * 60_000), tz) === wall);
+}
+
+/**
+ * The one time text of everything an owner says yes to, and of the lines that report it
+ * (approval prompts, Booked and booking-failure lines, the release window): the text
+ * determines the (start, end) pair, to the minute, exactly. It is the `formatRange` text, plus
+ * the year whenever the start or the end is not in the owner's local year of `now` (the time
+ * of the request; unknown → always shown), and the UTC offset for a local time that occurs
+ * twice (the DST fall-back hour).
+ */
+export function exactRange(start: Date, end: Date, tz: string, now?: Date): string {
+  const showYear = now === undefined || yearOf(start, tz) !== yearOf(now, tz) || yearOf(end, tz) !== yearOf(now, tz);
+  const amb = (d: Date) => ambiguousLocalTime(d, tz);
+  if (!showYear && !amb(start) && !amb(end)) return formatRange(start, end, tz);
+  const one = (d: Date) => `${formatDay(d, tz)}${showYear ? ` ${yearOf(d, tz)}` : ''}, ${formatTime(d, tz)}${amb(d) ? ` (UTC${offsetOf(d, tz)})` : ''}`;
+  return `${one(start)} – ${one(end)}`;
+}

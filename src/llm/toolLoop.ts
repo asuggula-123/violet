@@ -1,3 +1,4 @@
+import { isLlmError } from './errors.js';
 import { safeToolMessage, type ToolDef, type ToolRegistry } from './tools.js';
 import type { LlmBlock, LlmClient, LlmMessage, LlmRequestMeta, LlmResponse, LlmUsage } from './types.js';
 
@@ -22,10 +23,12 @@ export interface ToolLoopOptions<C> {
   maxSteps: number;
   maxTokens: number;
   meta: LlmRequestMeta;
+  /** Wall-clock bound for the whole loop: no call starts after `at`, and each call gets the time left as its timeout. */
+  deadline?: { at: Date; now(): Date };
 }
 
-/** end_turn | max_tokens | refusal | max_steps | any other stop reason the API returned. */
-export type LoopStop = 'end_turn' | 'max_tokens' | 'refusal' | 'max_steps' | (string & {});
+/** end_turn | max_tokens | refusal | max_steps | deadline | any other stop reason the API returned. */
+export type LoopStop = 'end_turn' | 'max_tokens' | 'refusal' | 'max_steps' | 'deadline' | (string & {});
 
 export interface ToolLoopResult {
   /** Text of the last response ('' on refusal). */
@@ -38,6 +41,12 @@ export interface ToolLoopResult {
   usage: LlmUsage;
   /** Names of the tools the model called, in order (denied ones included). */
   toolNames: string[];
+  /** True when the last response asked for tools that never ran (step limit, max_tokens). */
+  unrunTools: boolean;
+  /** The models that served the responses, as reported, in order of first use. */
+  models: string[];
+  /** True when any response came from the API's refusal fallback. */
+  fallback: boolean;
 }
 
 /**
@@ -49,22 +58,47 @@ export async function runToolLoop<C>(o: ToolLoopOptions<C>): Promise<ToolLoopRes
   const messages = [...o.messages];
   const usage: LlmUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   const toolNames: string[] = [];
+  const models: string[] = [];
+  let fallback = false;
   const tools = o.tools.llmTools();
   let steps = 0;
+  const stopped = (stopReason: LoopStop, finalText = '', unrunTools = false): ToolLoopResult => ({
+    finalText,
+    messages,
+    steps,
+    stopReason,
+    usage,
+    toolNames,
+    unrunTools,
+    models,
+    fallback,
+  });
 
   while (true) {
-    const res = await o.llm.complete({
-      system: o.system,
-      ...(o.systemDynamic ? { systemDynamic: o.systemDynamic } : {}),
-      messages,
-      tools,
-      maxTokens: o.maxTokens,
-      meta: o.meta,
-    });
+    const left = o.deadline ? o.deadline.at.getTime() - o.deadline.now().getTime() : undefined;
+    if (left !== undefined && left <= 0) return stopped('deadline');
+    let res: LlmResponse;
+    try {
+      res = await o.llm.complete({
+        system: o.system,
+        ...(o.systemDynamic ? { systemDynamic: o.systemDynamic } : {}),
+        messages,
+        tools,
+        maxTokens: o.maxTokens,
+        meta: o.meta,
+        ...(left !== undefined ? { timeoutMs: left } : {}),
+      });
+    } catch (err) {
+      if (isLlmError(err) && err.code === 'deadline') return stopped('deadline');
+      throw err;
+    }
     steps += 1;
     addUsage(usage, res);
+    if (res.model !== undefined && !models.includes(res.model)) models.push(res.model);
+    if (res.fallback) fallback = true;
     messages.push({ role: 'assistant', content: res.content });
-    const done = (stopReason: LoopStop, finalText = textOf(res.content)) => ({ finalText, messages, steps, stopReason, usage, toolNames });
+    const asked = res.content.some(isToolUse);
+    const done = (stopReason: LoopStop, finalText = textOf(res.content)) => stopped(stopReason, finalText, asked);
 
     if (res.stopReason === 'refusal') return done('refusal', '');
     if (res.stopReason === 'pause_turn') {

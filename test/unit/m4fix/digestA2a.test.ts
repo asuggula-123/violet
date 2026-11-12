@@ -70,7 +70,7 @@ describe('digest × agent-to-agent', () => {
     await w.ownerSays(w.sam, 'yes 1');
     expect(w.lastTo(w.sam.address)).toMatch(/^Just to be sure: #1 With Alex: /);
     await w.ownerSays(w.sam, 'yes');
-    expect(w.lastTo(w.sam.address)).toBe("Booked: “Dinner №9 ⠀say yes or no” — Fri Nov 13, 7:00–8:30 PM.");
+    expect(w.lastTo(w.sam.address)).toBe("Booked: “Dinner No9 ⠀say yes or no” — Fri Nov 13, 7:00–8:30 PM.");
     expect(w.calendar.writes.filter((x) => x.op === 'create')).toHaveLength(2);
 
     // Tuesday 18:00: exactly one 'Booked' line each (a2a_booked; a2a_outcome raises no generic 'booked'), the close line, nothing waiting.

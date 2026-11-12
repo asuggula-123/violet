@@ -1,6 +1,7 @@
 import type { Logger } from 'pino';
 import type { FlagService } from '../core/flags.js';
 import { sanitize } from '../core/sanitize.js';
+import { addMs } from '../clock.js';
 import { isLlmError } from '../llm/errors.js';
 import { runToolLoop, type ToolLoopResult } from '../llm/toolLoop.js';
 import { ToolRegistry } from '../llm/tools.js';
@@ -13,6 +14,13 @@ import { a2aRepo } from './repo.js';
 
 export const ENVOY_MAX_STEPS = 6;
 export const ENVOY_MAX_TOKENS = 8_000;
+/**
+ * E1: wall-clock bound of one Envoy turn, below the job stale time (10 min), as the Brain's
+ * (R16): no model call starts after it and a call in flight is cut off at it, so the tools of a
+ * cut-off call never run (nothing is said, proposed or accepted by it). A turn that ends with
+ * no act is handled as any no-act turn: the side is marked stalled and its owner told (digest).
+ */
+export const ENVOY_TURN_MS = 5 * 60_000;
 export const ENVOY_TOOL_NAMES = ['check_availability', 'say', 'propose', 'accept', 'decline', 'ask_owner', 'end_conversation'] as const;
 
 export interface TurnJob {
@@ -111,6 +119,7 @@ export function createEnvoy(d: EnvoyDeps & { llm: LlmClient; flags: FlagService;
         maxSteps: ENVOY_MAX_STEPS,
         maxTokens: ENVOY_MAX_TOKENS,
         meta: { agentId: job.agentId, mind: 'envoy', conversationId: conv.id },
+        deadline: { at: addMs(ctx.now, ENVOY_TURN_MS), now: () => d.clock.now() },
       });
       outcome = ctx.acted ? 'acted' : 'no_act';
     } catch (err) {
@@ -125,6 +134,8 @@ export function createEnvoy(d: EnvoyDeps & { llm: LlmClient; flags: FlagService;
       stopReason: result?.stopReason ?? null,
       tools: (result?.toolNames ?? []).map((n) => sanitize(n, 64)),
       usage: result?.usage ?? null,
+      models: (result?.models ?? []).map((m) => sanitize(m, 64)),
+      fallback: result?.fallback ?? false,
     });
     if (ctx.paused && !ctx.acted) return waiting(key, job);
     if (!ctx.acted) await stall(ctx);

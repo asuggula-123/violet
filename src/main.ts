@@ -1,5 +1,5 @@
 import { buildApp } from './app.js';
-import { parseConfig } from './config.js';
+import { loadDotEnv, parseConfig } from './config.js';
 import { migrate } from './db/migrate.js';
 import { openDb } from './db/open.js';
 import { createDeps } from './deps.js';
@@ -8,6 +8,7 @@ import { buildServer } from './server.js';
 import { startTelegram } from './transport/telegram/start.js';
 
 async function main(): Promise<void> {
+  loadDotEnv();
   const config = parseConfig(process.env);
   const db = await openDb(config);
   const deps = createDeps(config, db);

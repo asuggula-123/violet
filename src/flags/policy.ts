@@ -39,6 +39,8 @@ interface Claimed {
   agentId: string;
   text: string;
   released: boolean;
+  /** The held_until a released flag had: put back if its send fails, so order stays strict. */
+  heldUntil: Date | null;
 }
 
 /** claim() result when older held flags are due first: they are texted before this one decides. */
@@ -108,6 +110,17 @@ export function createNowPolicy(deps: { db: Db; gateway: OutboundGateway; action
         return null;
       }
       const released = f.held_until !== null;
+      if (released) {
+        // Strict order (8.5): a released flag waits while an older one is still due or being
+        // sent; the releaser that holds the older one texts this one next.
+        const older = await tx.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM flags o WHERE o.agent_id = $1 AND o.status = 'pending' AND o.urgency = 'now'
+           AND o.overflowed_at IS NULL AND o.seq < (SELECT seq FROM flags WHERE id = $2)
+           AND ((o.held_until IS NOT NULL AND o.held_until <= $3) OR o.attempt_at > $4)`,
+          [f.agent_id, f.id, now, new Date(now.getTime() - SEND_LEASE_MS)],
+        );
+        if ((older.rows[0]?.n ?? 0) > 0) return null;
+      }
       const date = localDate(a.timezone, now);
       if (f.budget_date !== date) {
         if (!released) {
@@ -131,7 +144,7 @@ export function createNowPolicy(deps: { db: Db; gateway: OutboundGateway; action
         }
       }
       await tx.query('UPDATE flags SET budget_date = $2, attempt_at = $3, held_until = NULL WHERE id = $1', [f.id, date, now]);
-      return { id: f.id, agentId: f.agent_id, text: f.text, released };
+      return { id: f.id, agentId: f.agent_id, text: f.text, released, heldUntil: f.held_until };
     });
   }
 
@@ -173,9 +186,12 @@ export function createNowPolicy(deps: { db: Db; gateway: OutboundGateway; action
         return;
       }
       // Free the lease so a retried raise tries again at once; the release task backs off.
+      // A released held flag stays held-due (its held_until put back), so younger held flags
+      // still wait for it: order stays strict across a failed send (8.5).
       const res = await db.query<{ send_failures: number }>(
-        `UPDATE flags SET attempt_at = NULL, send_failures = send_failures + 1 WHERE id = $1 AND status = 'pending' RETURNING send_failures`,
-        [c.id],
+        `UPDATE flags SET attempt_at = NULL, send_failures = send_failures + 1, held_until = COALESCE($2, held_until)
+         WHERE id = $1 AND status = 'pending' RETURNING send_failures`,
+        [c.id, c.released ? c.heldUntil : null],
       );
       const failures = res.rows[0]?.send_failures;
       if (failures !== undefined) {
@@ -197,20 +213,28 @@ export function createNowPolicy(deps: { db: Db; gateway: OutboundGateway; action
     deliver: (flag) => deliverById(flag.id, flag.kind, clock.now()),
 
     async releaseDue(now) {
-      const due = await db.query<{ id: string; kind: string; agent_id: string }>(
-        `SELECT id, kind, agent_id FROM flags
-         WHERE status = 'pending' AND urgency = 'now' AND overflowed_at IS NULL
-           AND ((held_until IS NOT NULL AND held_until <= $1)
-             OR (held_until IS NULL AND (attempt_at IS NULL OR attempt_at <= $2)))
-           AND (retry_at IS NULL OR retry_at <= $1)
-         ORDER BY seq LIMIT 500`,
-        [now, new Date(now.getTime() - SEND_LEASE_MS)],
-      );
-      for (const f of due.rows) {
-        try {
-          await deliverById(f.id, f.kind, now, false);
-        } catch (err) {
-          log.warn({ agentId: f.agent_id, flagId: f.id, err: err instanceof Error ? err.message : String(err) }, 'flag delivery failed; will retry');
+      // Looks again until no new flag is due: a flag that waited for an older one (a raise
+      // during this run, or one another releaser was sending) is decided in this run too.
+      const seen = new Set<string>();
+      for (;;) {
+        const due = await db.query<{ id: string; kind: string; agent_id: string }>(
+          `SELECT id, kind, agent_id FROM flags
+           WHERE status = 'pending' AND urgency = 'now' AND overflowed_at IS NULL
+             AND ((held_until IS NOT NULL AND held_until <= $1)
+               OR (held_until IS NULL AND (attempt_at IS NULL OR attempt_at <= $2)))
+             AND (retry_at IS NULL OR retry_at <= $1)
+           ORDER BY seq LIMIT 500`,
+          [now, new Date(now.getTime() - SEND_LEASE_MS)],
+        );
+        const fresh = due.rows.filter((f) => !seen.has(f.id));
+        if (fresh.length === 0) return;
+        for (const f of fresh) {
+          seen.add(f.id);
+          try {
+            await deliverById(f.id, f.kind, now, false);
+          } catch (err) {
+            log.warn({ agentId: f.agent_id, flagId: f.id, err: err instanceof Error ? err.message : String(err) }, 'flag delivery failed; will retry');
+          }
         }
       }
     },

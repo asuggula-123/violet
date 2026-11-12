@@ -109,6 +109,7 @@ describe('a2a booking is resumable (I7)', () => {
 });
 
 describe('a2a outcome prompts show every event (I5, I13)', () => {
+  const NOW = new Date('2026-11-12T12:00:00Z');
   let w: TestWorld | undefined;
   afterEach(async () => {
     await w?.close();
@@ -122,18 +123,18 @@ describe('a2a outcome prompts show every event (I5, I13)', () => {
     location: `Community hall room ${n}, second floor`,
   });
 
-  it('a long multi-event prompt falls back to a compact line that keeps every date and time', () => {
+  it('a long multi-event prompt is never shortened: it shows every title and location whole, so it does not fit and is refused', () => {
     const events = [9, 11, 13, 15, 17].map((h, i) => ev(i + 1, `2026-11-13T${String(h).padStart(2, '0')}:00:00-05:00`, `2026-11-13T${String(h).padStart(2, '0')}:30:00-05:00`));
-    const line = outcomePrompt({ peer: 'Sam', summary: 'Five sessions', events }, 'America/New_York');
-    expect(line).toMatch(/^With Sam: Fri Nov 13: “Planning[^”]*…” 9:00–9:30 AM, /);
+    const line = outcomePrompt({ peer: 'Sam', summary: 'Five sessions', events }, 'America/New_York', NOW);
+    for (const e of events) expect(line).toContain(`“${e.title}” — `);
+    for (const e of events) expect(line).toContain(`at “${e.location}”`);
     for (const t of ['9:00–9:30 AM', '11:00–11:30 AM', '1:00–1:30 PM', '3:00–3:30 PM', '5:00–5:30 PM']) expect(line).toContain(t);
-    expect(line).not.toContain('Community hall');
-    expect(outcomePromptFits({ peer: 'Sam', summary: 'Five sessions', events }, 'America/New_York')).toBe(true);
+    expect(outcomePromptFits({ peer: 'Sam', summary: 'Five sessions', events }, 'America/New_York', NOW)).toBe(false);
   });
 
   it('a short proposal keeps the full form', () => {
     const p = { peer: 'Sam', summary: 'x', events: [{ title: 'Dinner', start: '2026-11-13T19:00:00-05:00', end: '2026-11-13T20:30:00-05:00', location: "Luigi's" }] };
-    expect(outcomePrompt(p, 'America/New_York')).toBe("With Sam: “Dinner” — Fri Nov 13, 7:00–8:30 PM at “Luigi's”. Book it?");
+    expect(outcomePrompt(p, 'America/New_York', NOW)).toBe("With Sam: “Dinner” — Fri Nov 13, 7:00–8:30 PM at “Luigi's”. Book it?");
   });
 
   it('five overnight events cannot be shown whole: propose is refused by code and nobody is asked', async () => {
@@ -142,7 +143,7 @@ describe('a2a outcome prompts show every event (I5, I13)', () => {
       ...ev(i + 1, `2026-11-${day}T22:00:00-05:00`, `2026-11-${day + 1}T01:00:00-05:00`),
       calendars: 'both',
     }));
-    expect(outcomePromptFits({ peer: 'Sam', summary: 's', events }, 'America/New_York')).toBe(false);
+    expect(outcomePromptFits({ peer: 'Sam', summary: 's', events }, 'America/New_York', NOW)).toBe(false);
     w = await createTestWorld();
     const world = w;
     world.llm.on({ agentId: world.alex.agent.id, mind: 'brain' }, (req) =>
@@ -155,7 +156,7 @@ describe('a2a outcome prompts show every event (I5, I13)', () => {
     await world.ownerSays(world.alex, 'plan the fair with Sam');
     expect((await a2aMessages(world)).map((m) => m.kind)).not.toContain('proposal');
     const results = envoyCalls(world, world.sam).flatMap((c) => lastResults(c));
-    expect(results.some((r) => r.is_error && /fewer events or shorter titles/.test(r.content))).toBe(true);
+    expect(results.some((r) => r.is_error && /fewer events, or shorter titles/.test(r.content))).toBe(true);
     expect(world.textsTo(world.sam.address).filter((t) => t.startsWith('#'))).toEqual([]);
   });
 });

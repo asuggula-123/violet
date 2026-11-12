@@ -21,7 +21,11 @@ export function createLogger(config: Config): Logger {
 /** M2: the Claude API when ANTHROPIC_API_KEY is set; otherwise every model call fails with a typed error. */
 function createLlm(config: Config): LlmClient {
   if (!config.ANTHROPIC_API_KEY) return new UnconfiguredLlm();
-  return new AnthropicLlm({ apiKey: config.ANTHROPIC_API_KEY, models: { brain: config.VIOLET_MODEL, envoy: config.VIOLET_ENVOY_MODEL } });
+  return new AnthropicLlm({
+    apiKey: config.ANTHROPIC_API_KEY,
+    models: { brain: config.VIOLET_MODEL, envoy: config.VIOLET_ENVOY_MODEL },
+    fallback: config.VIOLET_MODEL_FALLBACK === 'on',
+  });
 }
 
 function createTransport(config: Config, clock: Clock): Transport {
@@ -31,8 +35,8 @@ function createTransport(config: Config, clock: Clock): Transport {
 
 /**
  * Production wiring of providers: the Claude API when ANTHROPIC_API_KEY is set, the real
- * Google providers once Google is configured (else, in production, providers that fail
- * every call, and in-memory doubles elsewhere), and the transport chosen by TRANSPORT.
+ * Google providers once Google is configured (else providers that fail every call, except
+ * in-memory doubles with the fake transport outside production), and the transport chosen by TRANSPORT.
  */
 export function createDeps(config: Config, db: Db): AppDeps {
   const clock = new SystemClock();

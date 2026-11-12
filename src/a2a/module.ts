@@ -25,7 +25,7 @@ export const a2aModule: Module = {
     const outcomes = createOutcomes(d);
     const releases = createReleases(d);
     const views = createViews(db);
-    const { service, sendNotice, flushNotices, after, resume } = createA2AService(d, views, outcomes);
+    const { service, sendNotice, flushNotices, after, resume, transcriptCommand } = createA2AService(d, views, outcomes);
 
     approvals.registerKind(OUTCOME_KIND, outcomes.kind);
     approvals.registerKind(RELEASE_KIND, releases.kind);
@@ -36,7 +36,12 @@ export const a2aModule: Module = {
     for (const tool of a2aBrainTools(d, releases, views)) brain.tools.register(tool);
     brain.contextProviders.push(views.brainContext);
     brain.beforePrompts.push((agentId) => flushNotices(agentId)); // I19: a turn's notices land before its prompts
-    app.router.hooks.onResume.push(resume);
+    // Q5: after the approvals resolver (installed first), before the Brain.
+    app.router.hooks.ownerInterceptors.push(transcriptCommand);
+    // I14: releases approved just before a pause go out now, then waiting notices and turns.
+    // I14: bookings both owners said yes to while one was paused are booked now, too.
+    // S3: these run before the approvals hook (installed first), so the prompts go out last.
+    app.router.hooks.onResume.unshift(releases.resumeApproved, outcomes.resumeHeld, resume);
     app.scheduler.register('a2a.sweep', A2A_SWEEP_MS, async () => {
       await service.sweep();
     });

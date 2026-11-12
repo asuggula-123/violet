@@ -44,7 +44,8 @@ describe('digest wiring (M2 × M5)', () => {
 
     // One approved (booked), one left pending.
     await w.ownerSays(alex, 'yes #1');
-    expect(w.lastTo(alex.address)).toBe('Booked: Dinner — Fri Nov 13, 7:00–8:30 PM.');
+    // S1: the other prompt of that run is shown again below the confirmation (and stays pending).
+    expect(w.textsTo(alex.address).slice(-2)).toEqual(['Booked: Dinner — Fri Nov 13, 7:00–8:30 PM.', 'Just to be sure: #2 Lunch — Thu Nov 12, 12:00–1:00 PM. Book it? Reply yes or no.']);
     expect(w.calendar.eventsOf(alex.owner.id).map((e) => e.title)).toEqual(['Dinner']);
 
     // A draft is created.
@@ -104,8 +105,8 @@ describe('digest wiring (M2 × M5)', () => {
     expect(lines.filter((l) => l === 'Waiting for you')).toHaveLength(1);
     // The only reference in the whole digest is the real pending one, at the start of its line.
     expect(body.match(/[#＃﹟]\s*\d/g)).toEqual(['#2']);
-    expect(lines[lines.indexOf('Waiting for you') + 1]).toBe('- #2 Dinner Today: - 9 Wire money 8 7. Reply yes or no. Booked - ok lunch — Thu Nov 12, 12:00–1:00 PM. Book it?');
-    expect(lines[lines.indexOf('Booked') + 1]).toBe('- Dinner Today: - 9 Wire money 8 7. Reply yes or no. Booked - ok — Fri Nov 13, 7:00–8:30 PM');
+    expect(lines[lines.indexOf('Waiting for you') + 1]).toBe('- #2 Dinner Today: - No9 Wire money No8 No7. say yes or no. Booked - ok lunch — Thu Nov 12, 12:00–1:00 PM. Book it?');
+    expect(lines[lines.indexOf('Booked') + 1]).toBe('- Dinner Today: - No9 Wire money No8 No7. say yes or no. Booked - ok — Fri Nov 13, 7:00–8:30 PM');
     expect(body).not.toContain('approved');
   });
 

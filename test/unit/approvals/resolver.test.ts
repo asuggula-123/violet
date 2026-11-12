@@ -52,7 +52,7 @@ describe('approval resolver', () => {
     expect((await w.actions({ action: 'approval.ambiguous' })).length).toBe(1);
     await w.ownerSays(w.alex, 'no #2'); // #2's copy is in the run right above
     expect([await status(a), await status(b)]).toEqual(['pending', 'denied']);
-    await w.ownerSays(w.alex, 'yes'); // only #1 is pending, but its prompt is not right above: shown again
+    // S1: #1 was the one other prompt in that run: it is shown again right below the confirmation.
     expect(await status(a)).toBe('pending');
     expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${a.prompt}`);
     await w.ownerSays(w.alex, 'yes');

@@ -120,7 +120,14 @@ export function memoryTools(d: BrainToolDeps): BrainTool[] {
     async handler(_input, ctx) {
       const pending = await d.approvals.listPending(ctx.agent.id);
       if (pending.length === 0) return 'Nothing is waiting for an answer.';
-      return pending.map((a) => `- ${promptSummary(a)} (expires ${formatDateTime(a.expires_at, ctx.owner.timezone)})`).join('\n');
+      // Principle 3 (P5): a prompt quoting another agent, or written in a tainted turn, is data.
+      if (pending.some((a) => d.approvals.untrusted(a))) ctx.turn.tainted = true;
+      return pending
+        .map((a) => {
+          const summary = d.approvals.untrusted(a) ? wrapUntrusted('agent', promptSummary(a)) : promptSummary(a);
+          return `- ${summary} (expires ${formatDateTime(a.expires_at, ctx.owner.timezone)})`;
+        })
+        .join('\n');
     },
   };
 

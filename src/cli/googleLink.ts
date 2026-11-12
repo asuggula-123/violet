@@ -1,10 +1,12 @@
 import { parseArgs } from 'node:util';
 import pino from 'pino';
 import { SystemClock } from '../clock.js';
-import { parseConfig } from '../config.js';
+import { loadDotEnv, parseConfig } from '../config.js';
 import { migrate } from '../db/migrate.js';
 import { openDb } from '../db/open.js';
 import { createGoogle, googleConfigured } from '../google/services.js';
+
+loadDotEnv();
 
 // With embedded PGlite (no DATABASE_URL), stop the server first: one process per data dir.
 const USAGE = 'Usage: npm run google:link -- --owner <owner id>';

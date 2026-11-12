@@ -1,4 +1,5 @@
 import { addMs, type Clock } from '../clock.js';
+import { firstName } from '../a2a/repo.js';
 import type { TransportName } from '../transport/types.js';
 import type { ActionLog, Actor } from './actionLog.js';
 import { generatePairingCode, hashPairingCode, PAIRING_TTL_MS } from './pairing.js';
@@ -44,10 +45,33 @@ export function assertTimezone(tz: string): void {
   }
 }
 
+/**
+ * Multi-owner: agents and every code-written line name another owner by first name
+ * (`Sam's Violet`), so a first name (as `firstNameKey` compares it) is used once per household.
+ */
+/**
+ * The key two first names are compared by: NFKC (a decomposed accent, a full-width or other
+ * compatibility form looks the same as the plain one, so it is the same name), then any case.
+ */
+export function firstNameKey(name: string): string {
+  return firstName(name.normalize('NFKC')).normalize('NFKC').toLowerCase();
+}
+
+export function assertFirstNameFree(name: string, members: Array<Pick<OwnerRow, 'name'>>): void {
+  const key = firstNameKey(name);
+  const taken = members.find((m) => firstNameKey(m.name) === key);
+  if (taken) {
+    throw new Error(
+      `The first name "${firstName(name)}" is already used in this household (by "${taken.name}"). Agents tell owners apart by first name, so pick a different first name.`,
+    );
+  }
+}
+
 export async function createOwnerWithAgent(ctx: SetupCtx, input: NewOwnerWithAgent, actor: Actor = 'system'): Promise<CreatedOwner> {
   assertTimezone(input.timezone);
   const household = await ctx.repos.households.get(input.householdId);
   if (!household) throw new Error(`Unknown household ${input.householdId}`);
+  assertFirstNameFree(input.name, await ctx.repos.owners.inHousehold(household.id));
   const owner = await ctx.repos.owners.create({
     householdId: household.id,
     name: input.name,

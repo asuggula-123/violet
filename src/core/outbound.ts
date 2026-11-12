@@ -6,7 +6,8 @@ import type { Repos } from './repos/index.js';
 import type { AgentRow } from './types.js';
 
 export interface SentToOwner {
-  messageId: string;
+  /** null: delivered, but the `messages` row could not be stored (outbound.sent `recorded: false`). */
+  messageId: string | null;
   transportMessageId: string;
 }
 
@@ -39,7 +40,7 @@ interface Deps {
   log: Logger;
 }
 
-type OwnerPurpose = Exclude<OutboundPurpose, 'canned'>;
+export type OwnerPurpose = Exclude<OutboundPurpose, 'canned'>;
 
 /** Stored on the outbound `messages` row. `tainted`: the text quotes third parties or was written in a tainted Brain turn (M4). */
 export interface OwnerMessageMeta {
@@ -56,14 +57,23 @@ export function createOutbound(deps: Deps): { gateway: OutboundGateway; control:
     return null;
   }
 
+  /**
+   * I15: every attempt leaves an outbound row. A send that fails is `outbound.failed` (and
+   * rethrown, so the job retries). A text the transport delivered is never sent again: if
+   * storing it fails, `outbound.sent` is written with `recorded: false` and the caller is told
+   * it was sent (`messageId` null), so no retry repeats it.
+   */
   async function deliverToOwner(
     agent: AgentRow,
-    text: string,
+    raw: string,
     purpose: OwnerPurpose,
     buttons: OutboundButton[] | undefined,
     meta: OwnerMessageMeta = {},
   ): Promise<SentToOwner | null> {
     if (!agent.owner_address) return suppressed(agent.id, 'no_owner', { purpose });
+    const text = storable(raw);
+    // Nothing to say once stored (only NULs or spaces): an empty message is never sent.
+    if (text.trim() === '') return suppressed(agent.id, 'empty', { purpose });
     let sent: { transportMessageId: string };
     try {
       sent = await transport.send({
@@ -77,26 +87,40 @@ export function createOutbound(deps: Deps): { gateway: OutboundGateway; control:
       await logFailure(agent.id, purpose, err);
       throw err;
     }
-    const row = await repos.messages.add({
-      agentId: agent.id,
-      thread: 'owner',
-      direction: 'out',
-      body: text,
-      purpose,
-      transportMessageId: sent.transportMessageId,
-      meta: {
-        ...(meta.tainted ? { tainted: true } : {}),
-        ...(meta.from ? { from: meta.from } : {}),
-        ...(buttons && buttons.length > 0 ? { buttons } : {}),
-      },
-    });
-    await actionLog.write({
-      agentId: agent.id,
-      actor: 'system',
-      action: 'outbound.sent',
-      detail: { to: 'owner', purpose, messageId: row.id, transportMessageId: sent.transportMessageId, chars: text.length },
-    });
-    return { messageId: row.id, transportMessageId: sent.transportMessageId };
+    const logged = { to: 'owner', purpose, transportMessageId: sent.transportMessageId, chars: text.length };
+    let messageId: string | null = null;
+    try {
+      const row = await repos.messages.add({
+        agentId: agent.id,
+        thread: 'owner',
+        direction: 'out',
+        body: text,
+        purpose,
+        transportMessageId: sent.transportMessageId,
+        meta: {
+          ...(meta.tainted ? { tainted: true } : {}),
+          ...(meta.from ? { from: meta.from } : {}),
+          ...(buttons && buttons.length > 0 ? { buttons } : {}),
+        },
+      });
+      messageId = row.id;
+      await actionLog.write({ agentId: agent.id, actor: 'system', action: 'outbound.sent', detail: { ...logged, messageId } });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      log.warn({ agentId: agent.id, purpose, err: error }, 'owner message delivered but not fully recorded');
+      try {
+        // `tainted` kept here (M.2): the history misses this row, so the next Brain turn reads the taint from the log.
+        const taint = meta.tainted ? { tainted: true } : {};
+        await actionLog.write({ agentId: agent.id, actor: 'system', action: 'outbound.sent', detail: { ...logged, messageId, recorded: false, error, ...taint } });
+      } catch (logErr) {
+        // The action log itself cannot be written: the text is delivered, so it is still not sent again.
+        log.error(
+          { agentId: agent.id, purpose, transportMessageId: sent.transportMessageId, err: logErr instanceof Error ? logErr.message : String(logErr) },
+          'owner message delivered but neither its message row nor its outbound.sent row could be stored',
+        );
+      }
+    }
+    return { messageId, transportMessageId: sent.transportMessageId };
   }
 
   /**
@@ -197,4 +221,11 @@ export function createOutbound(deps: Deps): { gateway: OutboundGateway; control:
   };
 
   return { gateway, control };
+}
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** Every owner-bound text can be stored: U+0000 is dropped and lone surrogates become U+FFFD (Postgres rejects both). */
+export function storable(text: string): string {
+  return text.replaceAll('\u0000', '').replace(LONE_SURROGATE, '\uFFFD');
 }

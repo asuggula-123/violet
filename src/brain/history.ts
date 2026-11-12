@@ -41,6 +41,19 @@ function textOf(r: HistoryRow, role: 'user' | 'assistant'): string {
   return isTaintedRow(r) ? wrapUntrusted('agent', r.body.trim()) : r.body.trim();
 }
 
+/**
+ * Fail closed (I11): a tainted text the owner was sent but whose `messages` row could not be
+ * stored (outbound.sent `recorded: false`, `tainted`) is missing from the history, so it would
+ * not taint later turns; its log row does. Like a tainted row, it never wears off by itself.
+ */
+export async function unrecordedTaint(db: Queryable, agentId: string): Promise<boolean> {
+  const res = await db.query(
+    `SELECT 1 FROM action_log WHERE agent_id = $1 AND action = 'outbound.sent' AND detail->>'recorded' = 'false' AND detail->>'tainted' = 'true' LIMIT 1`,
+    [agentId],
+  );
+  return res.rows.length > 0;
+}
+
 /** The owner thread up to and including `messageId` (later rows, e.g. from a failed attempt, are left out). */
 export async function loadOwnerThread(db: Queryable, agentId: string, messageId: string, limit = HISTORY_LIMIT): Promise<HistoryRow[]> {
   const res = await db.query<HistoryRow>(

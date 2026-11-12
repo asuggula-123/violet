@@ -8,10 +8,10 @@ export const NOT_CONFIGURED_REASON = "Google isn't connected on this server";
  * The server has no Google OAuth settings, so no owner can connect Google at all.
  * Same code as GoogleNotConnectedError ('not_connected': a missing connection), but its
  * text does not offer a connect link that cannot be made. `ownerMessage` is the field
- * the tool loop and CalendarWriter read for a safe reason (`safeMessage` is not).
+ * the tool loop and CalendarWriter read for a safe reason.
  */
 export class GoogleNotConfiguredError extends GoogleError {
-  readonly ownerMessage = NOT_CONFIGURED_REASON;
+  override readonly ownerMessage = NOT_CONFIGURED_REASON;
   constructor(op: string) {
     super('not_connected', `Google is not configured on this server (${op})`, `${NOT_CONFIGURED_REASON}.`);
   }

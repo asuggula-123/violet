@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PROMPT_BODY_MAX } from '../approvals/service.js';
-import type { ApprovalKind } from '../approvals/types.js';
+import { approvalsRepo } from '../approvals/repo.js';
+import type { ApprovalKind, ApprovalRow } from '../approvals/types.js';
 import { sha256 } from '../brain/memo.js';
 import { isoInstant } from '../brain/time.js';
 import type { BrainToolCtx } from '../brain/types.js';
@@ -9,9 +10,11 @@ import { addGuidance, openConversation } from './conversations.js';
 import { isRefusal, Refusal, type A2ADeps } from './deps.js';
 import { egressCheck } from './egress.js';
 import { releasePrompt } from './render.js';
-import { a2aRepo } from './repo.js';
+import { a2aRepo, queueNotice } from './repo.js';
 
 export const RELEASE_KIND = 'a2a_release';
+/** The reply to a yes that landed while paused (suppressed while paused; the release goes out after resume). */
+const PAUSED_REPLY = "You're paused, so it waits: it goes out when you text resume.";
 
 const releasePayload = z.discriminatedUnion('action', [
   z.object({
@@ -55,12 +58,12 @@ const textsOf = (p: ReleaseAction) => (p.action === 'open' ? [p.topic, p.text] :
 
 /**
  * The fixed tool result of a held release. I19: the prompt is held by the turn and goes out
- * right after the reply (when paused: on resume), so the model must not write it, its number
- * or a request to confirm itself.
+ * after the reply, or on resume when a pause lands (also after this text was returned), so
+ * the text promises neither; the model must not write the prompt, its number or a request to
+ * confirm itself.
  */
-function heldText(peer: string, owner: string, paused: boolean): string {
-  const when = paused ? 'when I can send again (I am paused)' : 'right after your reply';
-  return `Not sent. Nothing has gone to ${peer}: ${owner} gets a yes/no prompt showing the exact text ${when}, and it goes out only if they say yes. Tell ${owner} you will check with them first; do not say it was sent, and do not repeat the prompt or ask them to confirm in your own words.`;
+function heldText(peer: string, owner: string): string {
+  return `Not sent. Nothing has gone to ${peer}: ${owner} gets a yes/no prompt showing the exact text after your reply, or when I can send again, and it goes out only if they say yes. Tell ${owner} you will check with them first; do not say it was sent, and do not repeat the prompt or ask them to confirm in your own words.`;
 }
 
 /**
@@ -117,8 +120,7 @@ export function createReleases(d: A2ADeps) {
       }
       const approval = await d.approvals.request(ctx.agent.id, { kind: RELEASE_KIND, payload: p, idempotencyKey: ctx.callKey });
       await logEntry(ctx.agent.id, 'a2a.release_held', p, { approvalId: approval.id, reason: egress.ok === 'unreadable' ? 'calendar_unreadable' : ctx.turn.tainted ? 'tainted' : 'pending_retry' });
-      const paused = (await d.repos.agents.get(ctx.agent.id))?.paused === true;
-      return heldText(p.peerLabel, ctx.owner.name, paused);
+      return heldText(p.peerLabel, ctx.owner.name);
     }
     const done = await perform(ctx.agent.id, p, ctx.callKey, true);
     await logEntry(ctx.agent.id, 'a2a.release', p, { conversationId: done.conversationId });
@@ -149,24 +151,70 @@ export function createReleases(d: A2ADeps) {
     return res.rows.flatMap((r) => [r.name, r.owner.split(/\s+/)[0] ?? '']);
   }
 
+  /**
+   * Carries out an approved release exactly as stored (key `approval:<id>`, so a repeat never
+   * releases twice) and marks the approval executed, or failed on a refusal. I14: while the
+   * agent is paused nothing crosses: the approval stays `approved` and `resumeApproved` carries
+   * it out after the owner's resume. Returns the owner's line and, when refused, the reason shown.
+   */
+  async function carryOut(approval: Pick<ApprovalRow, 'id' | 'agent_id' | 'payload'>, notice: boolean): Promise<{ line: string; refused: string | null }> {
+    const p = releasePayload.parse(approval.payload);
+    const finish = (status: 'executed' | 'failed', error: string | null) => approvalsRepo(d.db, d.clock).finishExecution(approval.id, status, error);
+    try {
+      const { line } = await perform(approval.agent_id, p, `approval:${approval.id}`, notice);
+      if (await finish('executed', null)) await d.actionLog.write({ agentId: approval.agent_id, actor: 'system', action: 'approval.executed', detail: { approvalId: approval.id } });
+      await logEntry(approval.agent_id, 'a2a.release', p, { approvalId: approval.id });
+      return { line, refused: null };
+    } catch (err) {
+      if (!isRefusal(err)) throw err;
+      await d.actionLog.write({ agentId: approval.agent_id, actor: 'system', action: err.limit ? 'a2a.limit' : 'a2a.tool_denied', detail: { tool: RELEASE_KIND, approvalId: approval.id, [err.limit ? 'limit' : 'reason']: err.reason } });
+      if (err.reason === 'paused') {
+        // The log row above marks it for resumeApproved. A resume that ran between the refusal
+        // and that row did not see it, so the pause is read again: if it is already over, it
+        // goes out now (the key makes a second carry-out by the resume hook a no-op).
+        const agent = await d.repos.agents.get(approval.agent_id);
+        if (agent && !agent.paused) return carryOut(approval, notice);
+        return { line: PAUSED_REPLY, refused: null };
+      }
+      if (await finish('failed', err.ownerMessage)) await d.actionLog.write({ agentId: approval.agent_id, actor: 'system', action: 'approval.failed', detail: { approvalId: approval.id, reason: err.reason } });
+      return { line: `Couldn't send it: ${err.ownerMessage}`, refused: err.ownerMessage };
+    }
+  }
+
+  /**
+   * onResume (I14): releases the owner approved that a pause refused (approved just before
+   * the pause landed) are carried out now, once; the owner gets the usual
+   * `Talking to …` / `Told …` notice, or one `Couldn't send #n: …` line.
+   */
+  async function resumeApproved(agentId: string): Promise<void> {
+    // Only releases a pause held back (carryOut logged that refusal with the approval's id):
+    // a row left `approved` for any other reason (e.g. by older code after a refusal the owner
+    // was told about) never crosses here.
+    const res = await d.db.query<Pick<ApprovalRow, 'id' | 'agent_id' | 'payload' | 'ref'>>(
+      `SELECT a.id, a.agent_id, a.payload, a.ref FROM approvals a
+       WHERE a.agent_id = $1 AND a.kind = $2 AND a.status = $3
+         AND EXISTS (SELECT 1 FROM action_log l WHERE l.agent_id = a.agent_id AND l.action = 'a2a.tool_denied'
+                     AND l.detail->>'approvalId' = a.id AND l.detail->>'reason' = 'paused')
+       ORDER BY a.seq`,
+      [agentId, RELEASE_KIND, 'approved'],
+    );
+    for (const a of res.rows) {
+      const { refused } = await carryOut(a, true);
+      if (refused) await queueNotice(d.db, d, { id: `release-failed:${a.id}`, agentId, purpose: 'reply', text: `Couldn't send #${a.ref}: ${refused}`, tainted: false });
+    }
+  }
+
   const kind: ApprovalKind<ReleaseAction> = {
     schema: releasePayload,
     quotesThirdParty: true,
     render: (p) => render(p),
     async onApproved({ approval }) {
-      const p = releasePayload.parse(approval.payload);
-      try {
-        const { line } = await perform(approval.agent_id, p, `approval:${approval.id}`, false);
-        await logEntry(approval.agent_id, 'a2a.release', p, { approvalId: approval.id });
-        return line;
-      } catch (err) {
-        if (!isRefusal(err)) throw err;
-        await d.actionLog.write({ agentId: approval.agent_id, actor: 'system', action: err.limit ? 'a2a.limit' : 'a2a.tool_denied', detail: { tool: RELEASE_KIND, [err.limit ? 'limit' : 'reason']: err.reason } });
-        return `Couldn't send it: ${err.ownerMessage}`;
-      }
+      // A retried hook after a refusal: the refusal stands, nothing is tried again.
+      if (approval.status === 'failed') return `Couldn't send it: ${approval.error ?? 'it was refused'}`;
+      return (await carryOut(approval, false)).line;
     },
     onDenied: async () => "Okay, I won't send it.",
   };
 
-  return { release, kind };
+  return { release, kind, resumeApproved };
 }

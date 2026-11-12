@@ -38,7 +38,8 @@ under a Postgres advisory lock). There is no separate migration step. The migrat
 the plain SQL files in `src/db/migrations/`, applied in order and recorded in
 `schema_migrations`: `001_core.sql`, `002_approvals.sql`, `003_google.sql`,
 `004_a2a.sql` (the agent-to-agent tables), `005_flags.sql`, `006_transport.sql`, `007_i19.sql` (genuine
-approval deliveries, prompts held until the end of a Brain turn). Production has no
+approval deliveries, prompts held until the end of a Brain turn), `008_approval_taint.sql` (approvals
+requested in a tainted turn). Production has no
 fallback database: with `NODE_ENV=production` (set in the image) and no `DATABASE_URL`,
 the server and every CLI stop with `DATABASE_URL is missing: ...` instead of using an
 embedded database.
@@ -47,7 +48,10 @@ embedded database.
 
 **[account]** For each owner (e.g. Alex and Sam), in Telegram, talk to `@BotFather`:
 
-1. `/newbot`, choose a display name and a username ending in `bot`.
+1. `/newbot`, choose a display name and a username ending in `bot`. Anyone who texts the
+   bot sees both, so keep them neutral: a display name like `Violet` and a random username
+   (for example `violet_k3x9_bot`), never the owner's name. Leave the bot's description and
+   about text empty or generic. Otherwise the bot tells every stranger whose agent it is.
 2. Keep the token it gives you: `<bot id>:<secret>`. The digits before `:` are the
    **bot id**, which is that owner's agent address.
 3. Keep the bot **username** (without `@`) for the pairing link.
@@ -103,8 +107,11 @@ settings (`NODE_ENV`, `PORT`, `TRANSPORT`, `TELEGRAM_MODE`) are in `fly.toml` `[
 
 Google is used only when all four of `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_REDIRECT_URI` and `TOKEN_ENC_KEY` are set. Optional, not secret: `VIOLET_MODEL`
-(the Brain's model, default `claude-opus-5-5`), `VIOLET_ENVOY_MODEL` (the agent-to-agent
-model, default `VIOLET_MODEL`), `GOOGLE_SCOPES`. `.env.example` lists every variable
+(the Brain's model; the default is the one model id in `src/config.ts`), `VIOLET_ENVOY_MODEL` (the agent-to-agent
+model, default `VIOLET_MODEL`), `VIOLET_MODEL_FALLBACK` (`on` by default: when the model
+declines a request, the API may answer it with a fallback model it picks; the `brain.turn`
+and `a2a.envoy_turn` log rows show which model answered and whether it was a fallback;
+`off`: no fallback, the owner gets the fixed refusal line), `GOOGLE_SCOPES`. `.env.example` lists every variable
 `src/config.ts` reads, with a one-line explanation each.
 
 Set them in one command (values only on your machine; leave out the Google lines to run
@@ -190,6 +197,10 @@ another owner ("ask Sam about dinner on Friday") and the two agents talk.
   the same name (exact match) or the household id for both owners. A different spelling
   creates a second household, and the agents cannot reach each other. Agents are found by
   the other owner's first name.
+- **One first name per household.** `owner:add` refuses an owner whose first name (any
+  case, any Unicode form that looks the same: `é` typed as one or two characters, full-width
+  letters) is already used in that household, because agents and prompts name people by first
+  name. Use a different first name (for example a nickname).
 - **Nothing leaves the server for agent-to-agent traffic.** The agents' conversation is
   rows in Postgres and jobs on the server's own queue; no Telegram message, email or other
   network message carries it. What does go out: the Envoy's model calls (Claude API, model
@@ -199,7 +210,7 @@ another owner ("ask Sam about dinner on Friday") and the two agents talk.
   (`Talking to Sam's Violet about …`), questions the other side's Violet needs answered (at
   once), one yes/no prompt per owner for any outcome (both must say yes before anything is
   booked: separate events, no invites), and digest lines for conversations started, closed,
-  stuck or booked. Either owner can ask for the verbatim transcript.
+  stuck or booked. Either owner can get the verbatim transcript by texting `transcript`.
 - **Without Google** (production): an outcome both owners approve is not booked; both get
   `Couldn't book …: Google isn't connected on this server. Nothing was booked.`
 - Limits: 3 open conversations and 10 new ones a day per pair of agents, 12 messages per side.
@@ -222,8 +233,10 @@ own Google account and approve. The page says "Connected. You can close this tab
   `fly logs --app <app>`.
 - **Pause an agent [real people]:** the owner texts `pause` to their bot (also `/pause`,
   any case). The agent sends one ack and then nothing to anyone (no reply, flag, digest or
-  stranger reply); the scheduler skips it. `resume` undoes it: approval prompts held
-  meanwhile are sent, and messages strangers left meanwhile are in the next digest.
+  stranger reply); the scheduler skips it. `resume` undoes it: notices held meanwhile are
+  sent, then the approval prompts held meanwhile, and messages strangers left meanwhile are
+  in the next digest. A booking both owners said yes to waits for the resume; if its start
+  passes first, nothing is booked and both owners are told.
 - **What owners receive unasked [real people]:** approval prompts at once, and so are
   agent-to-agent questions and results (`Waiting for Sam.`, `Booked: …`, `Sam said no to: …`),
   even at night and outside the daily budget; urgent flags
@@ -252,6 +265,15 @@ own Google account and approve. The page says "Connected. You can close this tab
 ## Local run
 
 No accounts, keys or money involved.
+
+Settings can go in `.env` (`cp .env.example .env`, then fill in): `npm run dev`, `npm start`
+and every CLI read `./.env` from the directory you run them in. A variable already set in
+your shell wins over the file. `.env` is git-ignored and never copied into the image.
+
+Google: without the four Google settings, the fake transport (outside production) uses an
+in-memory stand-in calendar and mailbox, lost on restart. With `TRANSPORT=telegram` (real
+people) or `NODE_ENV=production`, it never does: calendar and Gmail requests fail with
+"Google isn't connected on this server" and an approved event is not booked.
 
 - **No keys, embedded database (PGlite in `./.data/pglite`), fake transport:**
 

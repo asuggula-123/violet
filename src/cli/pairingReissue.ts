@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { SystemClock } from '../clock.js';
-import { parseConfig } from '../config.js';
+import { loadDotEnv, parseConfig } from '../config.js';
 import { createActionLog } from '../core/actionLog.js';
 import { reissuePairingCode, UnknownAgentError } from '../core/pairingReissue.js';
 import { pairingCodeLines } from '../core/pairingText.js';
@@ -8,6 +8,8 @@ import { createRepos } from '../core/repos/index.js';
 import { migrate } from '../db/migrate.js';
 import { openDb } from '../db/open.js';
 import { checkTelegramCliArgs } from '../transport/telegram/pairing.js';
+
+loadDotEnv();
 
 // With embedded PGlite (no DATABASE_URL), stop the server first: one process per data dir.
 const USAGE = 'Usage: npm run pairing:reissue -- --agent <agent id> [--reset] [--bot-username <telegram bot username>]';

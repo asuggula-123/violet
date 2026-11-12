@@ -66,8 +66,8 @@ function xorshift(seed: number): () => number {
  * The oracle: from the transport's own send log and the stored inbound messages, every
  * typed resolution must have been a reply-to on a message carrying that approval's buttons,
  * or that message must be in the unbroken run of button-carrying messages directly above the
- * owner message (by the chat numbering); for a bare answer, every other approval in that run
- * must have been closed before. Also: every approval_deliveries row is such a message.
+ * owner message (by the chat numbering); for a bare answer, it must be the only approval in
+ * that run (closed or not). Also: every approval_deliveries row is such a message.
  */
 async function oracleViolations(w: TestWorld): Promise<string[]> {
   const out: string[] = [];
@@ -96,7 +96,6 @@ async function oracleViolations(w: TestWorld): Promise<string[]> {
   for (const [m, n] of perMessage) if (n > WHICH_ONE_LIMIT) out.push(`${n} re-sends for one message ${m}`);
 
   const all = await w.actions();
-  const closing = new Set(['approval.approved', 'approval.denied', 'approval.cancelled', 'approval.expired']);
   for (const row of all) {
     if ((row.action !== 'approval.approved' && row.action !== 'approval.denied') || row.detail.via !== 'text') continue;
     const target = String(row.detail.approvalId);
@@ -124,9 +123,8 @@ async function oracleViolations(w: TestWorld): Promise<string[]> {
       continue;
     }
     if (/\d/.test(m.body)) continue;
-    for (const other of new Set(run.filter((a) => a !== target))) {
-      if (!all.some((r) => r.id < row.id && closing.has(r.action) && r.detail.approvalId === other)) out.push(`${row.id}: bare "${m.body}" resolved ${target} while ${other} was also pending right above`);
-    }
+    // I19 (since 305a14a, P11): the only approval in RUN(m), closed or not.
+    for (const other of new Set(run.filter((a) => a !== target))) out.push(`${row.id}: bare "${m.body}" resolved ${target} while ${other} was also right above`);
   }
   return out;
 }
@@ -468,7 +466,7 @@ describe('I19 verify round 1', () => {
       expect(await resolutions(w)).toBe(0);
     });
 
-    it('a prompt that was sent but whose row was never recorded is not a genuine delivery: a yes under it resolves nothing', async () => {
+    it('a prompt that was sent but whose messages row could not be stored is still a genuine delivery (R1): logged recorded:false, never sent again, a yes under it books', async () => {
       w = await createTestWorld();
       const add = w.app.repos.messages.add.bind(w.app.repos.messages);
       let failed = false;
@@ -480,14 +478,15 @@ describe('I19 verify round 1', () => {
         return add(row);
       }) as typeof add;
       const a = await ask(w, w.alex);
+      expect(failed).toBe(true);
       expect(sentTo(w, w.alex).map((m) => m.purpose)).toEqual(['approval']); // on screen…
-      expect((await w.db.query('SELECT 1 FROM approval_deliveries WHERE approval_id = $1 AND transport_message_id IS NOT NULL', [a.id])).rows).toHaveLength(0); // …not recorded
-      await w.ownerSays(w.alex, 'yes');
-      expect(await statusOf(w, a)).toBe('pending');
-      expect(await count(w, 'approval.reprompted')).toBe(0); // never sent as far as Violet knows: the Brain gets the yes
-      // The owner is not stuck: the sweep delivers the prompt again (recorded now), and the yes under it books.
+      // …and recorded where I19 looks: approval_deliveries, never the messages row.
+      expect((await w.db.query('SELECT 1 FROM approval_deliveries WHERE approval_id = $1 AND transport_message_id IS NOT NULL', [a.id])).rows).toHaveLength(1);
+      const sent = (await w.actions({ action: 'outbound.sent' })).filter((r) => r.detail.purpose === 'approval');
+      expect(sent.map((r) => r.detail.recorded)).toEqual([false]);
+      // The sweep does not send it again (I15: a delivered text is never resent).
       await w.advance({ minutes: 3 });
-      expect(w.lastTo(w.alex.address)).toBe(a.prompt);
+      expect(sentTo(w, w.alex).map((m) => m.purpose)).toEqual(['approval']);
       await w.ownerSays(w.alex, 'yes');
       expect(await statusOf(w, a)).toBe('executed');
     });

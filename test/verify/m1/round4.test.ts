@@ -64,7 +64,7 @@ describe('verify M1 round 4', () => {
   it('pause: a newly paired owner who says pause before the pairing job ran ends paused with one ack each', async () => {
     const created = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
-      name: 'Alex',
+      name: 'Robin', // Q8: one first name per household
       timezone: 'America/New_York',
       transport: 'fake',
       agentAddress: 'violet-unpaired',
@@ -82,7 +82,7 @@ describe('verify M1 round 4', () => {
   it('pause: a stranger cannot pause through the ingest path on an unpaired agent, even with /pause', async () => {
     const created = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
-      name: 'Sam',
+      name: 'Robin', // Q8: one first name per household
       timezone: 'America/New_York',
       transport: 'fake',
       agentAddress: 'violet-unpaired-2',

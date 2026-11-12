@@ -1,9 +1,13 @@
+import type { OwnerMessageCtx } from '../core/router.js';
 import { a2aRepo, NOTICE_JOB, TURN_JOB } from './repo.js';
 import { expireIdle, type AfterEvent } from './conversations.js';
 import type { A2ADeps } from './deps.js';
 import { shown } from './render.js';
 import type { createViews } from './views.js';
 import type { A2AService } from './types.js';
+
+const TRANSCRIPT_COMMAND = 'transcript';
+const NO_CONVERSATION = 'No agent conversations yet, so there is no transcript.';
 
 const CLOSE_REASON: Record<string, string> = {
   ended: 'ended by an agent',
@@ -14,7 +18,7 @@ const CLOSE_REASON: Record<string, string> = {
 };
 
 /** Notices, after-events (digest flags, I17: never texted at once), resume and the idle sweep. */
-export function createA2AService(d: A2ADeps, views: ReturnType<typeof createViews>, outcomes: { resumeBookings(): Promise<number> }) {
+export function createA2AService(d: A2ADeps, views: ReturnType<typeof createViews>, outcomes: { resumeBookings(): Promise<number>; settleHeld(): Promise<number> }) {
   const repo = a2aRepo(d.db);
 
   async function sendNotice(job: { id: string }): Promise<void> {
@@ -70,9 +74,14 @@ export function createA2AService(d: A2ADeps, views: ReturnType<typeof createView
     for (const n of notices.rows) await d.jobs.enqueue(NOTICE_JOB, { id: n.id }, { lane: n.agent_id, dedupeKey: `a2a:notice:${n.id}:r${n.requeues}` });
   }
 
-  /** onResume (I14): deliveries and notices that waited while paused are queued again. */
+  /**
+   * onResume (I14): deliveries and notices that waited while paused are queued again. S3: the
+   * notices go out now, in order, so the approvals' unsent prompts (sent by their own hook,
+   * which runs after this one) are the last thing the owner gets.
+   */
   async function resume(agentId: string): Promise<void> {
     await requeueNotices('agent_id = $1', [agentId]);
+    await flushNotices(agentId);
     const turns = await d.db.query<{ turn_key: string; conversation_id: string; trigger_seq: number; requeues: number }>(
       `UPDATE a2a_turns SET requeues = requeues + 1 WHERE agent_id = $1 AND status = 'waiting' RETURNING turn_key, conversation_id, trigger_seq, requeues`,
       [agentId],
@@ -80,6 +89,23 @@ export function createA2AService(d: A2ADeps, views: ReturnType<typeof createView
     for (const t of turns.rows) {
       await d.jobs.enqueue(TURN_JOB, { conversationId: t.conversation_id, agentId, seq: t.trigger_seq }, { lane: agentId, dedupeKey: `a2a:turn:${t.turn_key}:r${t.requeues}` });
     }
+  }
+
+  /**
+   * Q5: the owner types `transcript` (trimmed, any case): code sends the transcript of their
+   * latest agent conversation, with no model call. An owner interceptor, so it runs only for
+   * the verified owner (I1) and is held while paused (I14) like every owner message.
+   */
+  async function transcriptCommand(ctx: OwnerMessageCtx): Promise<boolean> {
+    if (ctx.msg.kind !== 'text' || ctx.msg.text.trim().toLowerCase() !== TRANSCRIPT_COMMAND) return false;
+    const conversationId = await views.latest(ctx.agent.id);
+    await d.actionLog.write({ agentId: ctx.agent.id, actor: 'owner', action: 'a2a.transcript', detail: { conversationId, messageId: ctx.messageId } });
+    if (!conversationId) {
+      await d.gateway.sendToOwner(ctx.agent.id, NO_CONVERSATION, { purpose: 'reply' });
+      return true;
+    }
+    await d.gateway.sendToOwner(ctx.agent.id, await views.transcript(ctx.agent.id, conversationId), { purpose: 'transcript', meta: { tainted: true } });
+    return true;
   }
 
   const service: A2AService = {
@@ -90,10 +116,11 @@ export function createA2AService(d: A2ADeps, views: ReturnType<typeof createView
     // since; a paused agent's notices wait for onResume (I14).
     sweep: async () => {
       await outcomes.resumeBookings();
+      await outcomes.settleHeld();
       await requeueNotices('agent_id IN (SELECT id FROM agents WHERE NOT paused AND owner_address IS NOT NULL)', []);
       return expireIdle(d);
     },
   };
 
-  return { service, sendNotice, flushNotices, after, resume };
+  return { service, sendNotice, flushNotices, after, resume, transcriptCommand };
 }

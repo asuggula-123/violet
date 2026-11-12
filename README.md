@@ -21,6 +21,8 @@ dinner. Nothing happens until the people involved say yes.
   question again (or, under its own reply, treats it as conversation). The buttons work
   whenever Violet is not paused.
 - `pause` stops it sending anything to anyone; `resume` turns it back on.
+- `transcript` sends you everything said in your latest agent conversation, written by
+  code, not by the model.
 - A digest every day at 6 pm. Urgent notes (like a calendar clash): at most 3 a day,
   never between 10 pm and 7 am.
 
@@ -49,10 +51,13 @@ npm test         # the whole test suite
 `docs/DEMO.md` says what the demo shows and how to present it.
 
 For the real server locally (Postgres in Docker, `npm run dev`), follow "Local run" in
-`docs/DEPLOY.md`. To use your real Telegram bots without a public address, also set
+`docs/DEPLOY.md`. Put your settings in `.env` (`cp .env.example .env`): `npm run dev`,
+`npm start` and the CLIs read it, and a variable set in your shell wins. To use your real
+Telegram bots without a public address, also set
 `TRANSPORT=telegram`, `TELEGRAM_MODE=polling` and `TELEGRAM_BOT_TOKENS`, then add each
 owner with `--transport telegram --agent-address <bot id>` and pair them (DEPLOY.md
-steps 7-8).
+steps 7-8). With real bots and no Google settings, calendar and email answer "Google isn't
+connected on this server" and nothing is booked.
 
 ## Keys you need to create
 
@@ -68,12 +73,15 @@ None for the demo or the tests. For a real server ("you" = make it yourself):
 | `GOOGLE_REDIRECT_URI` | You: `<PUBLIC_BASE_URL>/oauth/google/callback` | Optional*. Register it on the client. |
 | `TOKEN_ENC_KEY` | You: `openssl rand -base64 32` | Optional*. Encrypts stored Google access. Keep a copy. |
 | `GOOGLE_SCOPES` | Leave empty | Optional. Overrides the Google permissions. |
+| `VIOLET_MODEL_FALLBACK` | Leave empty (on), or `off` | Optional. On: a request the model declines may be answered by a fallback model the API picks; the log shows which model answered. Off: never. |
 | `ADMIN_TOKEN` | You: `openssl rand -hex 32` | Local test endpoints only. |
 | `DATABASE_URL` | Your Postgres provider | The database. |
 | `PUBLIC_BASE_URL` | Your server's address | Webhooks and Google links. |
 | Fly account | fly.io | Hosting. |
 
-*Without the four Google settings, calendar and email are off and nothing is booked.
+*Without the four Google settings, calendar and email are off and nothing is booked. Only
+the fake transport outside production (the demo, the tests, `npm run dev` with no bots) uses
+an in-memory stand-in calendar instead, lost on restart.
 `.env.example` lists every setting. Never put real values in the repo.
 
 ## How it is built
@@ -105,9 +113,8 @@ process; `TEST_DATABASE_URL=postgres://… npm run test:pg` runs them on a real 
   another agent waits for your yes on the exact words, even your own words. Each reply your
   Violet writes while this applies counts as such text too, so it does not wear off by
   itself: from then on, every instruction to another agent costs one more tap (the yes).
-  When one message makes Violet ask twice, a typed answer counts only for the question
-  right above it: answer the first with yes and its number; your next yes makes Violet
-  show the second again, and the yes under that answers it (the buttons answer each one
+  When one message makes Violet ask twice, answer the first (yes and its number); Violet
+  shows the second again, and your next yes or no answers it (the buttons answer each one
   in one tap).
 - A model fooled by an email or another agent can still tell you untrue things in its own
   reply, including text that looks like Violet's notices or prompts. It cannot act on
@@ -117,6 +124,11 @@ process; `TEST_DATABASE_URL=postgres://… npm run test:pg` runs them on a real 
 - Vendor docs could not be opened while building: check the Fly and Google steps in
   `docs/DEPLOY.md` against current docs and prices, and the Gmail permission
   `gmail.drafts.create` against Google's consent screen (fallback in DEPLOY.md).
+- A temporary Google error at the moment of booking fails the booking; ask again.
+- A model fooled by an email can leave a draft in your Gmail drafts. Nothing is sent, and
+  new drafts are listed in the digest.
+- Urgent notes are one line sent at once, but they are not yes/no questions; only
+  approvals are.
 - Nothing has been deployed and no real account has been touched.
 
 ## Deploy

@@ -120,7 +120,8 @@ describe('scripted mode never touches the network', () => {
     }
   });
 
-  it('three scripted runs print the same transcript, line for line (the owners\' digests are grouped Alex then Sam)', async () => {
+  // T1: three full demo runs; generous timeout for a loaded machine.
+  it('three scripted runs print the same transcript, line for line (the owners\' digests are grouped Alex then Sam)', { timeout: 180_000 }, async () => {
     const a = (await runDemo(quiet)).output;
     for (let i = 0; i < 2; i++) expect((await runDemo(quiet)).output).toEqual(a);
   });

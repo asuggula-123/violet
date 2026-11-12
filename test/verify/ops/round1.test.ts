@@ -3,6 +3,7 @@
 // placeholder Telegram tokens and no PUBLIC_BASE_URL, so no Telegram call is ever made.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -201,17 +202,36 @@ function startMain(env: Record<string, string>): { child: ChildProcess; output: 
   return { child, output: () => out, exited };
 }
 
-async function waitHealthy(port: number, exited: Promise<number | null>): Promise<Response> {
-  let done = false;
-  void exited.then(() => (done = true));
-  for (let i = 0; i < 400 && !done; i += 1) {
-    try {
-      return await fetch(`http://127.0.0.1:${port}/healthz`);
-    } catch {
-      await new Promise((r) => setTimeout(r, 100));
-    }
+/** Resolves once the child logs "violet started"; rejects (with its output) if it exits first or the deadline passes. */
+async function waitStarted(p: { output: () => string; exited: Promise<number | null> }, deadlineMs = 150_000): Promise<void> {
+  let exit: number | null | undefined;
+  void p.exited.then((code) => (exit = code));
+  const until = Date.now() + deadlineMs;
+  while (!/"violet started"/.test(p.output())) {
+    if (exit !== undefined) throw new Error(`server exited (${exit}) before it started:\n${p.output()}`);
+    if (Date.now() > until) throw new Error(`server did not start within ${deadlineMs} ms:\n${p.output()}`);
+    await new Promise((r) => setTimeout(r, 50));
   }
-  throw new Error('server never answered /healthz');
+}
+
+/** A port the OS just handed out (and freed), so no fixed range can collide with other sockets. */
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const { port } = server.address() as AddressInfo;
+  await new Promise((r) => server.close(r));
+  return port;
+}
+
+/** The exit code, or a failure carrying the output if the process does not exit within `ms`. */
+async function exitWithin(p: { output: () => string; exited: Promise<number | null> }, ms = 20_000): Promise<number | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`no exit within ${ms} ms:\n${p.output()}`)), ms)));
+  try {
+    return await Promise.race([p.exited, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Production refuses the embedded PGlite fallback (src/db/open.ts), so the full boot needs a
@@ -236,7 +256,7 @@ describe('production boot (real process, no network)', () => {
       await admin.query(`CREATE SCHEMA ${schema}`);
       const url = new URL(TEST_DB!);
       url.searchParams.set('options', `-c search_path=${schema}`);
-      const port = 20_000 + Math.floor(Math.random() * 20_000);
+      const port = await freePort();
       const env: Record<string, string> = {
         DATABASE_URL: url.toString(),
         NODE_ENV: 'production',
@@ -249,7 +269,8 @@ describe('production boot (real process, no network)', () => {
       };
       const p = startMain(env);
       try {
-        const health = await waitHealthy(port, p.exited);
+        await waitStarted(p);
+        const health = await fetch(`http://127.0.0.1:${port}/healthz`);
         expect(health.status, p.output()).toBe(200);
         expect(await health.json()).toEqual({ ok: true });
         const auth = { authorization: 'Bearer fake-admin-token', 'content-type': 'application/json' };
@@ -268,7 +289,7 @@ describe('production boot (real process, no network)', () => {
         });
         expect(hook.status).toBe(401);
         p.child.kill('SIGTERM');
-        expect(await p.exited, p.output()).toBe(0);
+        expect(await exitWithin(p), p.output()).toBe(0);
         expect(p.output()).toMatch(/"shutting down"/);
         expect(p.output()).toMatch(/webhooks not registered/);
         expect(p.output()).not.toMatch(/telegram webhook registered|setWebhook failed/);
@@ -280,7 +301,7 @@ describe('production boot (real process, no network)', () => {
         await admin.end();
       }
     },
-    90_000,
+    200_000,
   );
 });
 

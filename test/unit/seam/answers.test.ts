@@ -86,7 +86,7 @@ describe('seam: answering a held release', () => {
       return respond([{ type: 'text', text: REPLY }]);
     });
     await w.ownerSays(w.alex, SECRET);
-    expect(toolText).toMatch(/when I can send again \(I am paused\)/);
+    expect(toolText).toMatch(/after your reply, or when I can send again,/);
     expect(w.transport.sent.filter((m) => m.toAddress === w.alex.address && m.purpose === 'approval')).toEqual([]);
     await w.ownerSays(w.alex, 'resume');
     const texts = w.textsTo(w.alex.address);
@@ -113,9 +113,9 @@ describe('seam: answering a held release', () => {
     await w.ownerSays(w.alex, 'yes 2');
     expect(await statusByRef(w, w.alex, 2)).toBe('executed');
     expect(await statusByRef(w, w.alex, 1)).toBe('pending');
-    await nothingCrossed();
-    await w.ownerSays(w.alex, 'no 1');
+    // S1: the release was the one other prompt in that run: shown again below the confirmation.
     expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${PROMPT}`);
+    await nothingCrossed();
     await w.ownerSays(w.alex, 'no');
     expect(await statusByRef(w, w.alex, 1)).toBe('denied');
     await w.advance({ hours: 30 });
@@ -154,7 +154,7 @@ describe('seam: agent notices and held releases', () => {
     expect((await w.actions({ action: 'a2a.release', agentId: w.alex.agent.id })).length).toBe(1);
   });
 
-  it('after the yes to one of two prompts, a bare yes cannot resolve the other one (it is no longer directly above): it is shown again', async () => {
+  it('after the yes to one of two prompts, the other one is shown again below the confirmation; nothing of it crosses before its own answer', async () => {
     w = await createTestWorld();
     scriptEnvoy(w, w.sam, () => ['ok']);
     scriptEnvoy(w, w.alex, () => ['ok']);
@@ -162,10 +162,11 @@ describe('seam: agent notices and held releases', () => {
     taintedTurn(w, w.alex, [talk('t', 'Saturday', SECRET), tell('g', conv, 'Thursday works.')]);
     await w.ownerSays(w.alex, SECRET);
     await w.ownerSays(w.alex, 'yes 2');
-    expect(w.lastTo(w.alex.address)).toBe("Told Sam's Violet: “Thursday works.”");
-    await w.ownerSays(w.alex, 'yes');
-    expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${PROMPT}`);
+    expect(w.textsTo(w.alex.address).slice(-2)).toEqual(["Told Sam's Violet: “Thursday works.”", `Just to be sure: ${PROMPT}`]);
     expect(await statusByRef(w, w.alex, 1)).toBe('pending');
+    await nothingCrossed(false);
+    await w.ownerSays(w.alex, 'no');
+    expect(await statusByRef(w, w.alex, 1)).toBe('denied');
     await nothingCrossed(false);
     expect((await w.actions({ action: 'a2a.release', agentId: w.alex.agent.id })).length).toBe(2); // the clean open and #2
   });

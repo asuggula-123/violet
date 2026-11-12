@@ -103,9 +103,11 @@ describe('M4 verify round 1', () => {
     });
     await w.ownerSays(w.alex, 'Set up dinner with Sam on Friday evening');
     const prompt = w.textsTo(w.alex.address).find((t) => t.startsWith('#') && t.includes('With Sam'));
-    expect(prompt, 'an outcome prompt was sent').toBeDefined();
-    // Every event the owner's yes would book must be visible in the prompt: its time at least.
-    for (const t of ['9:00', '11:00', '1:00', '3:00', '5:00']) expect(prompt!, `event at ${t} shown`).toContain(t);
+    // What you see is what gets booked (P2): five long titles and locations cannot all be shown
+    // whole in one prompt, so propose is refused and nobody is asked; nothing is cut or dropped.
+    expect(prompt, 'no outcome prompt was sent').toBeUndefined();
+    expect((await w.db.query("SELECT 1 FROM approvals WHERE kind = 'a2a_outcome'")).rows).toEqual([]);
+    expect((await w.db.query("SELECT 1 FROM a2a_messages WHERE kind = 'proposal'")).rows).toEqual([]);
   });
 
   // ---------------------------------------------------------------- I10: busy bits beyond the peer's window

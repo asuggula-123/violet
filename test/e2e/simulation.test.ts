@@ -236,10 +236,10 @@ describe('Simulation: two agents with fake calendars agree on a dinner time; bot
         const author = (id: string | null) => (id === p.agent.id ? 'Violet' : `${peer}'s Violet`);
         const proposer = author(stored[2]!.from_agent_id);
         expect(lines.slice(1)).toEqual([
-          `${author(stored[0]!.from_agent_id)} opened “Dinner Friday”: “${stored[0]!.body}”`,
+          `${author(stored[0]!.from_agent_id)} opened “Dinner Friday” (time window Fri Nov 13, 12:00 AM – Sat Nov 14, 12:00 AM): “${stored[0]!.body}”`,
           `${author(stored[1]!.from_agent_id)}: “${stored[1]!.body}”`,
-          `${proposer} proposed “Dinner” — Fri Nov 13, 7:00–8:30 PM (summary: “${stored[2]!.body}”)`,
-          `${author(stored[3]!.from_agent_id)} accepted the proposal (both owners are asked).`,
+          `${proposer} proposed (proposal 3): “Dinner” — Fri Nov 13, 7:00–8:30 PM, on both calendars. Summary: “${stored[2]!.body}”`,
+          `${author(stored[3]!.from_agent_id)} accepted proposal 3 (both owners are asked).`,
           expect.stringMatching(/ended the conversation/),
         ]);
       }
@@ -338,10 +338,8 @@ describe('Simulation variants: nothing is booked unless both owners say yes to t
 
     calendarsUnchanged();
     expect(w.lastTo(w.alex.address)).toBe('Waiting for Sam.');
-    expect((await approvalsOf(w, w.sam)).map((a) => [a.kind, a.status])).toEqual([
-      ['a2a_outcome', 'pending'],
-      ['calendar_event', 'pending'],
-    ]);
+    // P13: Sam's Brain's solo calendar_event for the agreed time is refused while the plan waits for both yeses.
+    expect((await approvalsOf(w, w.sam)).map((a) => [a.kind, a.status])).toEqual([['a2a_outcome', 'pending']]);
     const denied = [...(await w.actions({ action: 'tool.denied' })), ...(await w.actions({ action: 'a2a.tool_denied' }))].map((a) => `${String(a.detail.tool ?? '')}:${String(a.detail.reason)}`);
     expect(denied).toEqual(expect.arrayContaining(['book_event:unknown_tool', 'approve:unknown_tool', 'resolve_approval:unknown_tool', 'approve_all:unknown_tool', 'write_calendar:unknown_tool']));
     expect(denied).toEqual(expect.arrayContaining(['accept:own_proposal', 'accept:second_act', 'say:second_act']));
@@ -362,5 +360,31 @@ describe('Simulation variants: nothing is booked unless both owners say yes to t
     calendarsUnchanged();
     expect((await a2aRows(w)).filter((r) => r.kind === 'system').map((r) => r.body)).toEqual(['That time is no longer free, so nothing was booked.']);
     expect(JSON.stringify(envoyCalls(w))).not.toContain('Parent-teacher');
+  });
+});
+
+describe('Simulation variant (R10): the accept-time free/busy re-check is code, not the model', () => {
+  afterEach(async () => w.close());
+
+  it("Sam's Envoy proposes a time Alex is busy and Alex's fooled Envoy accepts: no prompt, nothing booked, a system line", async () => {
+    await world();
+    // Alex has physio 17:30-18:45: a dinner at 18:00 overlaps it.
+    const busy = { title: 'Dinner', start: est(at('2026-11-13T18:00:00')), end: est(at('2026-11-13T19:30:00')), calendars: 'both' };
+    script(w, w.sam, 'envoy', (req) => (contextOf(req).includes('] You proposed') ? ['Waiting.'] : [[toolUse('p', 'propose', { summary: 'Dinner', events: [busy] })], 'Done.']));
+    // Fooled: it accepts whatever Sam's agent proposes, without checking anything.
+    script(w, w.alex, 'envoy', (req) => {
+      const seq = peerProposalSeq(req);
+      return seq === null ? ['Waiting.'] : [[toolUse('a', 'accept', { proposal_seq: seq })], 'Done.'];
+    });
+    await dinnerAsked(w.alex);
+    const rows = await a2aRows(w);
+    expect(rows.map((r) => r.kind)).not.toContain('accept');
+    expect(rows.filter((r) => r.kind === 'system').map((r) => r.body)).toEqual(['That time is no longer free, so nothing was booked.']);
+    expect((await approvalsOf(w, w.alex)).filter((a) => a.kind === 'a2a_outcome')).toEqual([]);
+    expect((await approvalsOf(w, w.sam)).filter((a) => a.kind === 'a2a_outcome')).toEqual([]);
+    for (const p of [w.alex, w.sam]) expect(sentTo(w, p.address).filter((m) => m.purpose === 'approval')).toEqual([]);
+    await w.ownerSays(w.alex, 'yes');
+    await w.ownerSays(w.sam, 'yes');
+    calendarsUnchanged();
   });
 });

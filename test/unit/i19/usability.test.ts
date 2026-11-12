@@ -29,7 +29,7 @@ describe('I19 usability bounds', () => {
     expect(w.calendar.eventsOf(w.alex.owner.id).map((e) => e.title)).toEqual(['Dinner']);
   });
 
-  it('two prompts from one request: yes → Which one → yes 2 resolves #2; the next bare yes shows #1 again, the yes under it books #1', async () => {
+  it('two prompts from one request: yes → Which one → yes 2 resolves #2 and shows #1 again; the yes under it books #1', async () => {
     w = await createTestWorld();
     scriptBrain(w, w.alex, [[toolUse('a', 'request_calendar_event', DINNER), toolUse('b', 'request_calendar_event', LUNCH)], 'Both asked.']);
     await w.ownerSays(w.alex, 'book dinner and lunch');
@@ -38,8 +38,7 @@ describe('I19 usability bounds', () => {
     expect(w.textsTo(w.alex.address).slice(-3)).toEqual([RESOLVER_TEXT.whichOne(0), one!.prompt, two!.prompt]);
     await w.ownerSays(w.alex, 'yes 2');
     expect([await statusOf(w, one!), await statusOf(w, two!)]).toEqual(['pending', 'executed']);
-    // The confirmation is now right above, not #1's prompt: #1 is shown again rather than resolved.
-    await w.ownerSays(w.alex, 'yes');
+    // S1: #1 was the one other prompt in that run: shown again right below the confirmation.
     expect(await statusOf(w, one!)).toBe('pending');
     expect(w.lastTo(w.alex.address)).toBe(`${REPROMPT_PREFIX}${one!.prompt}`);
     await w.ownerSays(w.alex, 'yes');

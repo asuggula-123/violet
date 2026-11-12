@@ -1,7 +1,7 @@
 import type { Logger } from 'pino';
 import type { FlagService } from '../core/flags.js';
 import type { Repos } from '../core/repos/index.js';
-import { quote } from '../core/sanitize.js';
+import { quoteFolded } from '../brain/reply.js';
 import type { CalendarEvent, CalendarProvider } from '../google/types.js';
 import { GoogleNotConfiguredError } from '../google/unconfigured.js';
 import { addDays, isQuietHours, localDate, localParts, quietHoursEnd } from './time.js';
@@ -64,11 +64,11 @@ function span(zone: string, e: CalendarEvent): string {
   return s.period === t.period ? `${s.time}-${t.time} ${t.period}` : `${s.time} ${s.period}-${t.time} ${t.period}`;
 }
 
-/** One line, rendered by code; titles may be written by third parties (invites), so they are quoted (I13). */
+/** One line, rendered by code; titles may be written by third parties (invites), so they are quoted and folded (I13). */
 export function conflictText(zone: string, now: Date, [a, b]: ConflictPair): string {
   const dayA = dayWord(zone, now, a.start);
   const dayB = dayWord(zone, now, b.start);
-  const title = (e: CalendarEvent) => quote(e.title.trim() === '' ? '(no title)' : e.title, TITLE_MAX);
+  const title = (e: CalendarEvent) => quoteFolded(e.title.trim() === '' ? '(no title)' : e.title, TITLE_MAX);
   return `Conflict ${dayA}: ${title(a)} ${span(zone, a)} overlaps ${title(b)} ${dayB === dayA ? '' : `${dayB} `}${span(zone, b)}.`;
 }
 

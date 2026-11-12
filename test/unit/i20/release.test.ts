@@ -74,11 +74,9 @@ describe('I20: a tainted turn holds every release for the owner', () => {
     await hostileConversationOpen();
     await heldBoth();
     await w.ownerSays(w.alex, 'yes 1');
-    expect(w.lastTo(w.alex.address)).toBe(`Told Sam's Violet: “${SECRET}”`);
-    // I19: #2 is no longer directly above (the confirmation came between), so `yes 2` shows it
-    // again and resolves nothing; the yes under that re-prompt sends it.
-    await w.ownerSays(w.alex, 'yes 2');
-    expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${OPEN_PROMPT}`);
+    // S1: #2 was the one other prompt of that run: shown again right below the confirmation;
+    // nothing of it crosses until the yes under that re-prompt.
+    expect(w.textsTo(w.alex.address).slice(-2)).toEqual([`Told Sam's Violet: “${SECRET}”`, `Just to be sure: ${OPEN_PROMPT}`]);
     expect((await a2aMessages(w)).filter((m) => m.kind === 'open' && m.body === SECRET)).toEqual([]);
     await w.ownerSays(w.alex, 'yes');
     expect(w.lastTo(w.alex.address)).toBe(`Talking to Sam's Violet about “Saturday”: “${SECRET}”`);
@@ -94,10 +92,8 @@ describe('I20: a tainted turn holds every release for the owner', () => {
     await hostileConversationOpen();
     await heldBoth();
     await w.ownerSays(w.alex, 'no 1');
-    expect(w.lastTo(w.alex.address)).toBe("Okay, I won't send it.");
-    // I19: #2 is no longer directly above: `no 2` shows it again, the no under it counts.
-    await w.ownerSays(w.alex, 'no 2');
-    expect(w.lastTo(w.alex.address)).toBe(`Just to be sure: ${OPEN_PROMPT}`);
+    // S1: #2 is shown again right below the confirmation; the no under it counts.
+    expect(w.textsTo(w.alex.address).slice(-2)).toEqual(["Okay, I won't send it.", `Just to be sure: ${OPEN_PROMPT}`]);
     await w.ownerSays(w.alex, 'no');
     expect(w.lastTo(w.alex.address)).toBe("Okay, I won't send it.");
     await w.advance({ hours: 30 });

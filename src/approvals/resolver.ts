@@ -59,6 +59,9 @@ export const RESOLVER_TEXT = Object.freeze({
 
 type Basis = 'reply_to' | 'run';
 
+/** A re-send claim was lost (a candidate closed meanwhile, or another run of the message claimed first). */
+class LostClaim extends Error {}
+
 /**
  * The deterministic approval resolver (I5, I19): an owner interceptor. The router runs it
  * only for the verified owner (I1) and never while paused (I14). A typed yes/no resolves an
@@ -74,19 +77,40 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
   const repo = approvalsRepo(db, clock);
   const deliveries = deliveriesRepo(db, clock);
 
-  /** `tainted`: the text quotes third parties (a kind with quotesThirdParty): stored tainted (8.2 history hygiene). */
+  /** `tainted`: the text quotes third parties (service.untrusted: the kind, or a tainted turn's approval): stored tainted (8.2 history hygiene). */
   async function reply(ctx: OwnerMessageCtx, text: string, tainted = false): Promise<true> {
     await app.gateway.sendToOwner(ctx.agent.id, text, { purpose: 'reply', ...(tainted ? { meta: { tainted: true } } : {}) });
     return true;
   }
 
-  /** Runs the kind's callback and sends the short confirmation. Safe to repeat. */
+  /** Runs the kind's callback and sends the short confirmation, then (S1) the one other prompt of RUN(m). Safe to repeat. */
   async function finish(ctx: OwnerMessageCtx, a: ApprovalRow): Promise<true> {
     const kind = service.kind(a.kind);
     const kctx = await service.kindContext(a);
     const approved = a.status !== 'denied';
     const text = approved ? await kind?.onApproved?.(kctx) : await kind?.onDenied?.(kctx);
-    return reply(ctx, text || (approved ? RESOLVER_TEXT.approvedDefault(a.ref) : RESOLVER_TEXT.deniedDefault(a.ref)), service.quotesThirdParty(a.kind));
+    await reply(ctx, text || (approved ? RESOLVER_TEXT.approvedDefault(a.ref) : RESOLVER_TEXT.deniedDefault(a.ref)), service.untrusted(a));
+    await showNextInRun(ctx, a);
+    return true;
+  }
+
+  /**
+   * S1: one message made Violet ask twice and m answered one of them. If exactly one other
+   * approval delivered in RUN(m) is still pending, its prompt is shown again right below the
+   * confirmation (a genuine re-prompt delivery), so the owner's next bare yes or no is directly
+   * under it (I19 unchanged). Claimed per (m, approval): a retried hook sends nothing more. A
+   * button press has no chat number, so its RUN(m) is empty and nothing is shown again.
+   */
+  async function showNextInRun(ctx: OwnerMessageCtx, resolved: ApprovalRow): Promise<void> {
+    const run = new Set(await deliveries.run(ctx.agent.id, ctx.msg.chatMessageId));
+    run.delete(resolved.id);
+    if (run.size === 0) return;
+    const others = (await repo.listPending(ctx.agent.id)).filter((x) => run.has(x.id));
+    if (others.length !== 1 || (await app.repos.agents.get(ctx.agent.id))?.paused !== false) return;
+    const next = others[0]!;
+    if (!(await claimDeliveries(db, clock, ctx.agent.id, ctx.messageId, [next.id], 'reprompt'))) return;
+    const sent = await service.resend(next, ctx.messageId, 'reprompt');
+    await log(ctx, 'approval.reprompted', { approvalId: next.id, ref: next.ref, reason: 'next_in_run', ...(sent ? {} : { sent: false }) });
   }
 
   function log(ctx: OwnerMessageCtx, action: string, detail: Record<string, unknown>): Promise<void> {
@@ -133,7 +157,7 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
 
   /** Rule (d): the stored prompt again, as one new genuine delivery. Claimed first; only the claimant sends. */
   async function reprompt(ctx: OwnerMessageCtx, a: ApprovalRow, reason: string): Promise<true> {
-    if (!(await claimDeliveries(db, clock, ctx.agent.id, ctx.messageId, [a.id], 'reprompt'))) return true;
+    if (!(await claimDeliveries(db, clock, ctx.agent.id, ctx.messageId, [a.id], 'reprompt'))) throw new LostClaim();
     const sent = await service.resend(a, ctx.messageId, 'reprompt');
     await log(ctx, 'approval.reprompted', { approvalId: a.id, ref: a.ref, reason, ...(sent ? {} : { sent: false }) });
     return true;
@@ -142,7 +166,7 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
   /** Rule (e): one fixed line, then each prompt re-sent as its own genuine delivery, oldest first. */
   async function whichOne(ctx: OwnerMessageCtx, candidates: ApprovalRow[], reason: string): Promise<true> {
     const shown = candidates.slice(0, WHICH_ONE_LIMIT);
-    if (!(await claimDeliveries(db, clock, ctx.agent.id, ctx.messageId, shown.map((a) => a.id), 'which_one'))) return true;
+    if (!(await claimDeliveries(db, clock, ctx.agent.id, ctx.messageId, shown.map((a) => a.id), 'which_one'))) throw new LostClaim();
     await log(ctx, 'approval.ambiguous', { pending: candidates.length, shown: shown.map((a) => a.id), reason });
     await reply(ctx, RESOLVER_TEXT.whichOne(candidates.length - shown.length));
     for (const a of shown) await service.resend(a, ctx.messageId, 'which_one');
@@ -175,23 +199,40 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
     return res.rows.some((r) => r.sender === 'brain' || r.purpose === 'question');
   }
 
-  /** No genuine prompt answered: show the right prompt again, or let the Brain have the message. */
-  async function askAgain(ctx: OwnerMessageCtx, also: ApprovalRow[], reason: string, conversational: boolean): Promise<boolean> {
-    const answerable = await repo.listAnswerable(ctx.agent.id, ctx.messageId);
-    const ids = new Set(answerable.map((a) => a.id));
-    const candidates = [...answerable, ...also.filter((a) => !ids.has(a.id))];
-    if (candidates.length === 0) return false;
-    if (also.length === 0) {
-      // A conversational word or a reply to something that may ask a question goes to the Brain (it cannot approve).
-      if (isWeakAck(ctx.msg.text)) return false;
-      if (conversational && (await conversationAbove(ctx))) return false;
-    }
+  /** Rules (d)/(e) over `candidates`: one → re-prompt it; several → Which one, oldest first. */
+  async function showAgain(ctx: OwnerMessageCtx, candidates: ApprovalRow[], reason: string): Promise<true> {
     if (candidates.length === 1) return reprompt(ctx, candidates[0]!, reason);
-    candidates.sort((x, y) => x.ref - y.ref);
-    return whichOne(ctx, candidates, reason);
+    return whichOne(ctx, [...candidates].sort((x, y) => x.ref - y.ref), reason);
   }
 
+  /** No genuine prompt answered: show the right prompt again, or let the Brain have the message. */
+  async function askAgain(ctx: OwnerMessageCtx, reason: string, conversational: boolean): Promise<boolean> {
+    const candidates = await repo.listAnswerable(ctx.agent.id, ctx.messageId);
+    if (candidates.length === 0) return false;
+    // A conversational word or a reply to something that may ask a question goes to the Brain (it cannot approve).
+    if (isWeakAck(ctx.msg.text)) return false;
+    if (conversational && (await conversationAbove(ctx))) return false;
+    return showAgain(ctx, candidates, reason);
+  }
+
+  /**
+   * P10: never silence. A lost claim (a candidate closed between the choice and its claim) runs
+   * the choice once more with fresh candidates; lost again, the owner gets the not-open line.
+   * Rows for m already claimed by another run of m: that run answers (g).
+   */
   async function onText(ctx: OwnerMessageCtx, decision: Decision, ref: number | undefined): Promise<boolean> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await decideText(ctx, decision, ref);
+      } catch (err) {
+        if (!(err instanceof LostClaim)) throw err;
+        if (await deliveries.claimedFor(ctx.agent.id, ctx.messageId)) return true;
+        if (attempt >= 1) return notOpen(ctx, null, undefined, 'claim_lost');
+      }
+    }
+  }
+
+  async function decideText(ctx: OwnerMessageCtx, decision: Decision, ref: number | undefined): Promise<boolean> {
     const agentId = ctx.agent.id;
     // (a) Reply-to, checked before RUN: binds to the real message replied to.
     const replyTo = ctx.msg.replyToTransportMessageId;
@@ -203,7 +244,7 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
       }
       const reason = replied ? 'ref_conflict' : 'reply_to_non_prompt';
       if (ref !== undefined) return named(ctx, ref, null, decision, reason);
-      return askAgain(ctx, [], reason, false);
+      return askAgain(ctx, reason, false);
     }
     const run = await deliveries.run(agentId, ctx.msg.chatMessageId);
     // (b) Explicit ref: resolves only with a genuine delivery of it in RUN(m).
@@ -214,9 +255,15 @@ export function createResolver(app: App, service: ApprovalServiceImpl) {
     // no, a closed conversation, expiry) never turns an ambiguous yes into a yes for the other.
     const distinct = [...new Set(run)];
     const inRun = (await repo.listPending(agentId)).filter((a) => distinct.includes(a.id));
-    if (distinct.length === 1 && inRun.length === 1) return resolve(ctx, inRun[0]!, decision, 'run');
-    if (distinct.length > 1) return askAgain(ctx, inRun, 'several_above', false);
-    return askAgain(ctx, [], 'not_above', true);
+    if (distinct.length === 1) {
+      if (inRun.length === 1) return resolve(ctx, inRun[0]!, decision, 'run');
+      // P9: the one prompt directly above is closed: say so, as a reply-to or `yes <ref>` would.
+      const closed = await repo.get(distinct[0]!);
+      return notOpen(ctx, distinct[0]!, closed?.ref, 'not_pending');
+    }
+    // P8: two or more above: (d)/(e) on those still pending (one left → (d)); none → not open.
+    if (distinct.length > 1) return inRun.length === 0 ? notOpen(ctx, null, undefined, 'not_pending') : showAgain(ctx, inRun, 'several_above');
+    return askAgain(ctx, 'not_above', true);
   }
 
   return async function approvalResolver(ctx: OwnerMessageCtx): Promise<boolean> {

@@ -2,7 +2,7 @@ import { wrapUntrusted } from '../brain/untrusted.js';
 import type { BrainContextProvider } from '../brain/types.js';
 import { sanitize } from '../core/sanitize.js';
 import type { Queryable } from '../db/db.js';
-import { shown, transcriptLine } from './render.js';
+import { shown, transcriptLine, whole } from './render.js';
 import { a2aRepo, isParty } from './repo.js';
 import type { ConversationSummary } from './types.js';
 
@@ -19,15 +19,24 @@ export function createViews(db: Queryable) {
     return out;
   }
 
-  /** send_transcript_to_owner: every stored message the owner's side may see, one code-rendered line each. */
+  /** send_transcript_to_owner and the `transcript` command: every stored message the owner's side may see, one code-rendered line each. */
   async function transcript(agentId: string, conversationId: string): Promise<string> {
     const conv = await repo.conversation(conversationId);
     if (!conv || !isParty(conv, agentId)) throw new Error('a2a: not a party to this conversation');
     const parties = await repo.parties(conv, agentId);
     const tz = parties.me.owner.timezone;
-    const head = `Transcript: ${sanitize(parties.me.agent.name, 40)} ↔ ${parties.peerLabel}, ${shown(conv.topic, 80)} (${conv.status}${conv.close_reason ? `: ${conv.close_reason}` : ''})`;
+    const head = `Transcript: ${sanitize(parties.me.agent.name, 40)} ↔ ${parties.peerLabel}, ${whole(conv.topic, 100)} (${conv.status}${conv.close_reason ? `: ${conv.close_reason}` : ''})`;
     const lines = (await repo.visible(conv.id, agentId)).map((m) => transcriptLine(m, parties, tz));
     return [head, ...lines].join('\n');
+  }
+
+  /** The agent's latest conversation (the one started last), open or closed, or null. */
+  async function latest(agentId: string): Promise<string | null> {
+    const res = await db.query<{ id: string }>(
+      'SELECT id FROM a2a_conversations WHERE initiator_agent_id = $1 OR responder_agent_id = $1 ORDER BY seq DESC LIMIT 1',
+      [agentId],
+    );
+    return res.rows[0]?.id ?? null;
   }
 
   /**
@@ -61,5 +70,5 @@ export function createViews(db: Queryable) {
     return { text: lines.join('\n'), tainted };
   };
 
-  return { list, transcript, brainContext };
+  return { list, transcript, latest, brainContext };
 }

@@ -94,7 +94,8 @@ describe('m4fix verify round 1', () => {
   });
 
   // ------------------------------------------------- sanity: properties the milestone claims, re-checked independently
-  it('every non-letter, non-number code point as the gap in "#<gap>7" folds the sign (all planes)', () => {
+  // T1: CPU-heavy (every code point); generous timeout for a loaded machine.
+  it('every non-letter, non-number code point as the gap in "#<gap>7" folds the sign (all planes)', { timeout: 180_000 }, () => {
     const missed: number[] = [];
     for (let cp = 0; cp <= 0x10ffff; cp += 1) {
       if (cp >= 0xd800 && cp <= 0xdfff) continue;

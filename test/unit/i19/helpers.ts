@@ -27,7 +27,7 @@ export const count = async (w: TestWorld, action: string) => (await w.actions({ 
  * Invariant I19, checked from stored rows only (messages, approval_deliveries, action_log):
  * every approval.approved / approval.denied with via 'text' was a reply-to on a genuine
  * delivery of that approval, or a genuine delivery of it was in RUN(m) — and for a bare
- * answer it was the only approval in RUN(m) still pending at that moment.
+ * answer it was the only approval in RUN(m), closed or not.
  */
 export async function i19Violations(w: TestWorld): Promise<string[]> {
   const deliveries = (
@@ -37,7 +37,6 @@ export async function i19Violations(w: TestWorld): Promise<string[]> {
   ).rows;
   const genuine = new Map(deliveries.map((d) => [`${d.agent_id}|${d.transport_message_id}`, d.approval_id]));
   const all = await w.actions();
-  const closing = new Set(['approval.approved', 'approval.denied', 'approval.cancelled', 'approval.expired']);
   const out: string[] = [];
   for (const row of all) {
     if ((row.action !== 'approval.approved' && row.action !== 'approval.denied') || row.detail.via !== 'text') continue;
@@ -65,9 +64,10 @@ export async function i19Violations(w: TestWorld): Promise<string[]> {
       continue;
     }
     if (parseDecision(m.body)?.ref !== undefined) continue;
+    // I19 (since 305a14a, P11): a bare answer resolves only when it is the ONLY approval in RUN(m),
+    // closed or not: an approval that closed earlier still made the answer ambiguous.
     for (const other of new Set(run.filter((a) => a !== approvalId))) {
-      const closedBefore = all.some((r) => r.id < row.id && closing.has(r.action) && r.detail.approvalId === other);
-      if (!closedBefore) out.push(`${row.id}: bare "${m.body}" resolved ${approvalId} while ${other} was also pending right above`);
+      out.push(`${row.id}: bare "${m.body}" resolved ${approvalId} while ${other} was also right above`);
     }
   }
   return out;

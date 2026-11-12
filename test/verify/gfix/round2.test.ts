@@ -106,7 +106,7 @@ describe('verify gfix r2: pairing re-issue and --reset', () => {
       w = await createTestWorld({ modules: [] });
       const created = await createOwnerWithAgent(w.setup, {
         householdId: w.household.id,
-        name: 'Alex',
+        name: 'Robin', // Q8: one first name per household
         timezone: 'Europe/London',
         transport: 'fake',
         agentAddress: `violet-r${i}`,
@@ -133,7 +133,7 @@ describe('verify gfix r2: pairing re-issue and --reset', () => {
       w = await createTestWorld({ modules: [] });
       const created = await createOwnerWithAgent(w.setup, {
         householdId: w.household.id,
-        name: 'Alex',
+        name: 'Robin', // Q8: one first name per household
         timezone: 'Europe/London',
         transport: 'fake',
         agentAddress: `violet-n${i}`,

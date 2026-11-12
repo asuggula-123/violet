@@ -1,6 +1,8 @@
 /**
  * Typed Google errors. `message` is for logs (method, path, status — never bodies or
- * tokens). `safeMessage` is short owner-facing text other milestones may show as is.
+ * tokens). `safeMessage` is short owner-facing text other milestones may show as is;
+ * `ownerMessage` (the field the tool loop and CalendarWriter read) is the same text (P6).
+ * No text promises what the Brain cannot do: only the operator's `google:link` makes a link.
  */
 export type GoogleErrorCode =
   | 'denied'
@@ -17,6 +19,7 @@ export type GoogleErrorCode =
 export class GoogleError extends Error {
   readonly code: GoogleErrorCode;
   readonly safeMessage: string;
+  readonly ownerMessage: string;
   readonly retryable: boolean;
   readonly status: number | undefined;
 
@@ -25,6 +28,7 @@ export class GoogleError extends Error {
     this.name = new.target.name;
     this.code = code;
     this.safeMessage = safeMessage;
+    this.ownerMessage = safeMessage;
     this.retryable = opts.retryable ?? false;
     this.status = opts.status;
   }
@@ -39,7 +43,7 @@ export class GoogleDeniedError extends GoogleError {
 
 export class GoogleNotConnectedError extends GoogleError {
   constructor(ownerId: string) {
-    super('not_connected', `no Google account for owner ${ownerId}`, "Google isn't connected yet. Ask me for a connect link.");
+    super('not_connected', `no Google account for owner ${ownerId}`, "Google isn't connected yet. Ask whoever set up Violet for a connect link.");
   }
 }
 

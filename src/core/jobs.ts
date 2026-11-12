@@ -56,6 +56,13 @@ function retryHint(err: unknown): { permanent: boolean; retryAfterMs: number } {
   return { permanent: e.permanent === true, retryAfterMs: Math.max(0, after) };
 }
 
+/** The kind of a handler error, for the log: its class name and code (e.g. `LlmError:rate_limited`), never its message. */
+function errorClass(err: unknown): string {
+  if (!(err instanceof Error)) return typeof err;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && /^[A-Za-z0-9_.-]{1,40}$/.test(code) ? `${err.name}:${code}` : err.name.slice(0, 60);
+}
+
 export function defaultBackoffMs(attempt: number): number {
   return Math.min(5_000 * 2 ** (attempt - 1), 3_600_000);
 }
@@ -109,6 +116,19 @@ export function createJobQueue(
     log.error({ jobId: job.id, type: job.type, err: error }, 'job dead');
   }
 
+  /** I15: an attempt that failed and is rescheduled. The error class only: no message text, no secrets. */
+  async function logRetry(q: Queryable, job: { id: string; type: string; lane: string | null; attempts: number }, error: string) {
+    await actionLog.write(
+      {
+        actor: 'job',
+        action: 'job.retry',
+        agentId: await laneAgentId(q, job.lane),
+        detail: { jobId: job.id, type: job.type, lane: job.lane, attempt: job.attempts, error },
+      },
+      q,
+    );
+  }
+
   /**
    * Visibility timeout. Jobs still `running` after staleMs lost their worker (crash,
    * or a finish that could not be written). Out of attempts → dead; else → retry now.
@@ -126,11 +146,13 @@ export function createJobQueue(
         [cutoff, error, now],
       );
       for (const job of dead.rows) await logDead(tx, job, error);
-      const requeued = await tx.query(
+      const requeued = await tx.query<{ id: string; type: string; lane: string | null; attempts: number }>(
         `UPDATE jobs SET status = 'failed', last_error = $2, run_at = $3, locked_at = NULL
-         WHERE status = 'running' AND locked_at < $1`,
+         WHERE status = 'running' AND locked_at < $1
+         RETURNING id, type, lane, attempts`,
         [cutoff, error, now],
       );
+      for (const job of requeued.rows) await logRetry(tx, job, 'stale');
       if (requeued.rowCount > 0) log.warn({ count: requeued.rowCount }, 'requeued stale running jobs');
     });
   }
@@ -196,11 +218,14 @@ export function createJobQueue(
       });
       return;
     }
-    await db.query(`UPDATE jobs SET status = 'failed', last_error = $2, run_at = $3, locked_at = NULL WHERE ${mine}`, [
-      job.id,
-      message,
-      addMs(now, Math.max(backoff(job.attempts), hint.retryAfterMs)),
-    ]);
+    await db.tx(async (tx) => {
+      const res = await tx.query(`UPDATE jobs SET status = 'failed', last_error = $2, run_at = $3, locked_at = NULL WHERE ${mine}`, [
+        job.id,
+        message,
+        addMs(now, Math.max(backoff(job.attempts), hint.retryAfterMs)),
+      ]);
+      if (res.rowCount > 0) await logRetry(tx, job, errorClass(err));
+    });
     log.warn({ jobId: job.id, type: job.type, attempt: job.attempts, err: message }, 'job failed, will retry');
   }
 

@@ -1,8 +1,9 @@
 import { z } from 'zod';
-import { calendarEventPayload } from '../../approvals/calendarEvent.js';
+import { calendarEventKind, calendarEventPayload } from '../../approvals/calendarEvent.js';
+import { promptFits } from '../../approvals/service.js';
 import type { BusyInterval } from '../../google/types.js';
 import { ToolError } from '../../llm/tools.js';
-import { formatDateTime, formatDay, formatRange, isoInZone, isoInstant } from '../time.js';
+import { formatDateTime, formatDay, formatRange, isoInZone, isoInstant, MAX_DAYS_AHEAD, withinHorizon } from '../time.js';
 import type { BrainTool } from '../types.js';
 import { wrapUntrusted } from '../untrusted.js';
 import { line, range, type BrainToolDeps } from './deps.js';
@@ -19,6 +20,14 @@ export const CALENDAR_TOOL_TEXT = Object.freeze({
   requested:
     'The owner gets a yes/no prompt for this right after your reply. Do not repeat it or ask them to confirm in your own words. Nothing is booked unless they say yes.',
   paused: 'I am paused: the owner will get a yes/no prompt for this when I can send again. Nothing is booked unless they say yes.',
+  past: 'That start time is in the past.',
+  tooFar: `That start is more than ${MAX_DAYS_AHEAD} days ahead. I can only ask about events that start within ${MAX_DAYS_AHEAD} days.`,
+  tooLong: 'The owner must see the whole title and location in one short prompt line, and this does not fit. Use a shorter title or location.',
+  /** P13: the time is part of a plan with another owner that waits for both yeses. */
+  jointPending: (ref: number, answered = false) =>
+    answered
+      ? `That time overlaps the plan in prompt #${ref}, which the owner already approved and which now waits for the other owner's yes. Do not book it separately.`
+      : `That time overlaps the plan in prompt #${ref}, which waits for both owners' yes. Do not book it separately: tell the owner to answer prompt #${ref} instead.`,
 });
 
 function span(start: Date, end: Date, tz: string): string {
@@ -89,7 +98,14 @@ export function calendarTools(d: BrainToolDeps): BrainTool[] {
     input: calendarEventPayload,
     sideEffect: true,
     async handler(input, ctx) {
-      if (Date.parse(input.start) < ctx.now.getTime()) throw new ToolError('That start time is in the past.');
+      const start = new Date(input.start);
+      const end = new Date(input.end);
+      if (start.getTime() < ctx.now.getTime()) throw new ToolError(CALENDAR_TOOL_TEXT.past);
+      if (!withinHorizon(start, ctx.now)) throw new ToolError(CALENDAR_TOOL_TEXT.tooFar);
+      // What you see is what gets booked: the prompt shows every booked field whole, or nothing is asked.
+      if (!promptFits(calendarEventKind.render(input, { timezone: ctx.owner.timezone, now: ctx.now }))) throw new ToolError(CALENDAR_TOOL_TEXT.tooLong);
+      const joint = (await d.approvals.pendingJointEvents(ctx.agent.id)).find((e) => e.start < end && e.end > start);
+      if (joint) throw new ToolError(CALENDAR_TOOL_TEXT.jointPending(joint.ref, joint.answered));
       await d.approvals.request(ctx.agent.id, { kind: 'calendar_event', payload: input, idempotencyKey: ctx.callKey });
       // I19: the prompt is held and goes out right after the reply (the last word of the turn).
       const paused = (await d.repos.agents.get(ctx.agent.id))?.paused === true;

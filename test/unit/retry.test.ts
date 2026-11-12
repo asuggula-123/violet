@@ -17,7 +17,7 @@ describe('retried inbound processing', () => {
   it('pairing: a failed ack is resent once and the /start text never reaches the Brain', async () => {
     const created = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
-      name: 'Sam',
+      name: 'Robin', // Q8: one first name per household
       timezone: 'Europe/London',
       transport: 'fake',
       agentAddress: 'violet-new',

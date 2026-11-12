@@ -43,7 +43,7 @@ describe('action log coverage of flow 8.1 (I15)', () => {
   it('pairing success and failure', async () => {
     const created = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
-      name: 'Sam',
+      name: 'Robin', // Q8: one first name per household
       timezone: 'UTC',
       transport: 'fake',
       agentAddress: 'v-new',
@@ -100,7 +100,8 @@ describe('action log coverage of flow 8.1 (I15)', () => {
     w.transport.failNext();
     const m = await mark();
     await w.ownerSays(w.alex, 'hi');
-    expect(await actionsSince(m)).toEqual(['inbound.received', 'outbound.failed']);
+    // The job attempt that failed is rescheduled: job.retry (R4).
+    expect(await actionsSince(m)).toEqual(['inbound.received', 'outbound.failed', 'job.retry']);
   });
 
   it('rows carry agent, actor and time', async () => {

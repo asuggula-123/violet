@@ -35,12 +35,18 @@ export interface LlmRequest {
   maxTokens: number;
   /** Not sent to the API. Used for logging and for scripting tests. */
   meta: LlmRequestMeta;
+  /** Not sent to the API: the most wall time this call may take, retries included (the Brain's turn deadline). */
+  timeoutMs?: number;
 }
 
 export interface LlmResponse {
   content: LlmBlock[];
   stopReason: string;
   usage?: LlmUsage;
+  /** The model that served the response, as the API reports it (unknown for test doubles). */
+  model?: string;
+  /** True when the API's refusal fallback answered with a model it picked. */
+  fallback?: boolean;
 }
 
 export interface LlmUsage {

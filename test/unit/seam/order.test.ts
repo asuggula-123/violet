@@ -108,7 +108,7 @@ describe('seam: a held release is the last word of its turn', () => {
     const call = w.llm.calls.filter((c) => c.meta.agentId === w.alex.agent.id && c.meta.mind === 'brain').at(-1)!;
     const [released, booked] = lastResults(call).map((r) => r.content);
     expect(released).toBe(
-      "Not sent. Nothing has gone to Sam's Violet: Alex gets a yes/no prompt showing the exact text right after your reply, and it goes out only if they say yes. Tell Alex you will check with them first; do not say it was sent, and do not repeat the prompt or ask them to confirm in your own words.",
+      "Not sent. Nothing has gone to Sam's Violet: Alex gets a yes/no prompt showing the exact text after your reply, or when I can send again, and it goes out only if they say yes. Tell Alex you will check with them first; do not say it was sent, and do not repeat the prompt or ask them to confirm in your own words.",
     );
     expect(booked).toMatch(/right after your reply\. Do not repeat it or ask them to confirm in your own words\./);
     for (const r of [released, booked]) expect(r).not.toMatch(/#\d/);

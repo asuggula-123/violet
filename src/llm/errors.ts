@@ -1,6 +1,7 @@
 import type { LlmClient, LlmResponse } from './types.js';
 
-export type LlmErrorCode = 'unconfigured' | 'rate_limited' | 'overloaded' | 'server' | 'network' | 'auth' | 'bad_request' | 'unknown';
+/** 'deadline': the call was cut off at the caller's `timeoutMs` (the tool loop stops with stop reason 'deadline'). */
+export type LlmErrorCode = 'unconfigured' | 'rate_limited' | 'overloaded' | 'server' | 'network' | 'auth' | 'bad_request' | 'deadline' | 'unknown';
 
 /**
  * A model call failed. `retryable` errors may succeed later (the job retries);

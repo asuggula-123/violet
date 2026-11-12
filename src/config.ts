@@ -1,9 +1,13 @@
+import { existsSync } from 'node:fs';
 import { z } from 'zod';
 
 const optionalString = z
   .string()
   .optional()
   .transform((v) => (v === undefined || v.trim() === '' ? undefined : v.trim()));
+
+/** The Brain's model when VIOLET_MODEL is unset: the one model id in src/. */
+export const DEFAULT_MODEL = 'claude-opus-5-5';
 
 const configSchema = z
   .object({
@@ -16,6 +20,8 @@ const configSchema = z
     ANTHROPIC_API_KEY: optionalString,
     VIOLET_MODEL: optionalString,
     VIOLET_ENVOY_MODEL: optionalString,
+    /** on (default): a refused request may be answered by a fallback model the API picks; off: never. */
+    VIOLET_MODEL_FALLBACK: optionalString.pipe(z.enum(['on', 'off']).optional()),
     TRANSPORT: z.enum(['fake', 'telegram']).default('fake'),
     /** Comma-separated, one bot token per agent. */
     TELEGRAM_BOT_TOKENS: optionalString,
@@ -30,8 +36,8 @@ const configSchema = z
     GOOGLE_SCOPES: optionalString,
   })
   .transform((c) => {
-    const model = c.VIOLET_MODEL ?? 'claude-opus-5-5';
-    return { ...c, VIOLET_MODEL: model, VIOLET_ENVOY_MODEL: c.VIOLET_ENVOY_MODEL ?? model };
+    const model = c.VIOLET_MODEL ?? DEFAULT_MODEL;
+    return { ...c, VIOLET_MODEL: model, VIOLET_ENVOY_MODEL: c.VIOLET_ENVOY_MODEL ?? model, VIOLET_MODEL_FALLBACK: c.VIOLET_MODEL_FALLBACK ?? 'on' };
   });
 
 export type Config = z.infer<typeof configSchema>;
@@ -51,4 +57,12 @@ export function parseConfig(env: Record<string, string | undefined>): Config {
  */
 export function devEndpointsEnabled(config: Config): boolean {
   return config.TRANSPORT === 'fake' && config.NODE_ENV !== 'production' && config.ADMIN_TOKEN !== undefined;
+}
+
+/**
+ * Local setup (`cp .env.example .env`): the server and every CLI read `./.env` when it
+ * exists, before parseConfig. A variable already set in the real environment wins.
+ */
+export function loadDotEnv(file = '.env'): void {
+  if (existsSync(file)) process.loadEnvFile(file);
 }

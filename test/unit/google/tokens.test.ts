@@ -156,7 +156,7 @@ describe('TokenStore', () => {
     const err = await gw.g.calendar.freeBusy(owner(), gw.w.clock.now(), gw.w.clock.now()).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GoogleNotConnectedError);
     expect((err as GoogleError).code).toBe('not_connected');
-    expect((err as GoogleError).safeMessage).toBe("Google isn't connected yet. Ask me for a connect link.");
+    expect((err as GoogleError).safeMessage).toBe("Google isn't connected yet. Ask whoever set up Violet for a connect link.");
     expect(gw.stub.calls).toEqual([]);
   });
 

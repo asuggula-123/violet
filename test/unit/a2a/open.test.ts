@@ -94,7 +94,7 @@ describe('a2a open conversation (not about times)', () => {
     expect(transcript.toAddress).toBe(w.sam.address);
     expect(transcript.text.split('\n')).toEqual([
       'Transcript: Violet ↔ Alex\'s Violet, “Weekend” (closed: ended)',
-      'Alex\'s Violet opened “Weekend”: “Plans for the weekend?”',
+      'Alex\'s Violet opened “Weekend” (no time window): “Plans for the weekend?”',
       'Violet: “Sam is around on Sunday.”',
       'Alex\'s Violet ended the conversation: “Thanks, noted.”',
     ]);

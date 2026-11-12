@@ -6,13 +6,15 @@ type CreateParams = Anthropic.Beta.Messages.MessageCreateParamsNonStreaming;
 type ApiMessage = Anthropic.Beta.Messages.BetaMessage;
 
 /** The one SDK call this client makes. Tests inject a fake; production uses the real SDK. */
-export type CreateMessage = (params: CreateParams) => Promise<ApiMessage>;
+export type CreateMessage = (params: CreateParams, options?: { signal?: AbortSignal }) => Promise<ApiMessage>;
 
 export interface AnthropicLlmOptions {
   apiKey: string;
   /** Model per mind: VIOLET_MODEL for the Brain, VIOLET_ENVOY_MODEL for the Envoy. */
   models: Record<Mind, string>;
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** The API's server-side refusal fallback (VIOLET_MODEL_FALLBACK). Default true; false sends no fallback beta or parameter. */
+  fallback?: boolean;
   /** Test seam: replaces the SDK call. */
   create?: CreateMessage;
   /** Test seam: the SDK's fetch (to check the request on the wire). */
@@ -21,7 +23,7 @@ export interface AnthropicLlmOptions {
 }
 
 const EPHEMERAL = { type: 'ephemeral' } as const;
-/** Refusal fallback: on a policy decline the API re-runs the request on its default fallback model. */
+/** Refusal fallback: on a policy decline the API re-runs the request on a fallback model it picks. */
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 
 /**
@@ -45,7 +47,7 @@ export class AnthropicLlm implements LlmClient {
         timeout: 5 * 60_000,
         ...(opts.fetch ? { fetch: opts.fetch } : {}),
       });
-      this.create = (params) => client.beta.messages.create(params);
+      this.create = (params, options) => client.beta.messages.create(params, options);
     }
   }
 
@@ -67,15 +69,16 @@ export class AnthropicLlm implements LlmClient {
       ...(tools.length > 0 ? { tools } : {}),
       cache_control: EPHEMERAL,
       output_config: { effort: this.opts.effort ?? 'medium' },
-      betas: [FALLBACK_BETA],
-      fallbacks: 'default',
+      ...(this.opts.fallback === false ? {} : { betas: [FALLBACK_BETA], fallbacks: 'default' as const }),
     };
   }
 
   async complete(req: LlmRequest): Promise<LlmResponse> {
     let res: ApiMessage;
+    // The caller's bound covers the SDK's own retries too.
+    const signal = req.timeoutMs !== undefined ? AbortSignal.timeout(Math.max(1, Math.floor(req.timeoutMs))) : undefined;
     try {
-      res = await this.create(this.params(req));
+      res = await this.create(this.params(req), signal ? { signal } : undefined);
     } catch (err) {
       throw toLlmError(err);
     }
@@ -89,13 +92,23 @@ export class AnthropicLlm implements LlmClient {
         cacheReadTokens: u.cache_read_input_tokens ?? 0,
         cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
       },
+      ...(typeof res.model === 'string' ? { model: res.model } : {}),
+      fallback: servedByFallback(res),
     };
   }
+}
+
+/** A `fallback` content block, or a `fallback_message` entry in usage.iterations, marks a fallback hop. */
+function servedByFallback(res: ApiMessage): boolean {
+  const blocks = (res.content ?? []) as Array<{ type?: unknown }>;
+  const iterations = (res.usage?.iterations ?? []) as Array<{ type?: unknown }>;
+  return blocks.some((b) => b.type === 'fallback') || iterations.some((i) => i.type === 'fallback_message');
 }
 
 /** Maps SDK errors to LlmError. Messages are fixed strings: no prompt, key or header text. */
 export function toLlmError(err: unknown): LlmError {
   if (err instanceof LlmError) return err;
+  if (err instanceof Anthropic.APIUserAbortError) return new LlmError('deadline', false, 'model call ran past the turn deadline');
   if (err instanceof Anthropic.APIConnectionError) return new LlmError('network', true, 'could not reach the model API');
   if (err instanceof Anthropic.APIError) {
     const status = err.status;

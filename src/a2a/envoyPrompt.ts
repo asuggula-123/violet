@@ -43,9 +43,19 @@ export function envoyDynamic(conv: ConversationRow, side: SideRow, p: Parties, n
   ].join('\n');
 }
 
+/**
+ * (P7) Whose calendars, for the READER: 'mine' = only the reader's owner, 'theirs' = only the
+ * other owner, the words the propose tool uses. Read from the resolved agent ids, never from the
+ * proposer's own word, which is relative to the proposer.
+ */
+export function calendarsFor(agents: string[], reader: string): 'both' | 'mine' | 'theirs' {
+  if (agents.length > 1) return 'both';
+  return agents.includes(reader) ? 'mine' : 'theirs';
+}
+
 /** I13-safe one-liner of a stored proposal for the Envoy (inside the untrusted wrapper). */
-function proposalText(p: ProposalPayload): string {
-  const events = p.events.map((e) => `${e.title} ${e.start} → ${e.end}${e.location ? ` at ${e.location}` : ''} (calendars: ${e.calendars})`);
+function proposalText(p: ProposalPayload, reader: string): string {
+  const events = p.events.map((e) => `${e.title} ${e.start} → ${e.end}${e.location ? ` at ${e.location}` : ''} (calendars: ${calendarsFor(e.agents, reader)})`);
   return `${p.summary}${events.length ? `\nEvents:\n- ${events.join('\n- ')}` : '\nNo events (an agreement with nothing to book).'}`;
 }
 
@@ -65,7 +75,7 @@ function line(m: A2AMessageRow, p: Parties): string {
     case 'text':
       return `${head} ${who} said:\n${data(m.body)}`;
     case 'proposal':
-      return `${head} ${who} proposed (proposal_seq ${m.seq}):\n${data(proposalText(m.payload as unknown as ProposalPayload))}`;
+      return `${head} ${who} proposed (proposal_seq ${m.seq}):\n${data(proposalText(m.payload as unknown as ProposalPayload, p.me.agent.id))}`;
     case 'accept':
       return `${head} ${who} accepted proposal ${String(m.payload.proposal_seq)}; both owners were asked to approve.`;
     case 'decline':

@@ -7,6 +7,7 @@ import { ToolError } from '../llm/tools.js';
 import { endByOwner } from './conversations.js';
 import { isRefusal, type A2ADeps } from './deps.js';
 import type { createReleases } from './release.js';
+import { firstNameKey } from '../core/setup.js';
 import { a2aRepo, firstName, isParty } from './repo.js';
 import { A2A_LIMITS, DAY_MS, type ConversationRow } from './types.js';
 import { canonicalRelease } from './words.js';
@@ -62,8 +63,8 @@ export function a2aBrainTools(d: A2ADeps, releases: ReturnType<typeof createRele
            WHERE o.household_id = $1 AND o.id <> $2 ORDER BY o.created_at, o.id`,
           [ctx.owner.household_id, ctx.owner.id],
         );
-        const wanted = input.with.trim().toLowerCase();
-        const found = peer.rows.find((r) => firstName(r.name).toLowerCase() === wanted);
+        const wanted = input.with.normalize('NFKC').trim().toLowerCase();
+        const found = peer.rows.find((r) => firstNameKey(r.name) === wanted);
         if (!found) {
           await d.actionLog.write({ agentId: ctx.agent.id, actor: 'brain', action: 'a2a.limit', detail: { tool: 'talk_to_agent', limit: 'not_household' } });
           throw new ToolError(`There is no agent for “${sanitize(input.with, 60)}” in your household.`);

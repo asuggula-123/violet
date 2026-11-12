@@ -15,7 +15,7 @@ describe('pairing (flow 8.1 step 3)', () => {
     w = await createTestWorld({ modules: [] }); // bare M1 core
     created = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
-      name: 'Alex',
+      name: 'Robin', // Q8: one first name per household
       timezone: 'Europe/London',
       transport: 'fake',
       agentAddress,

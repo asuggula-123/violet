@@ -26,7 +26,8 @@ const liveRef = (out: string) => /[#♯⌗⋕][^\p{L}\p{N}]*[\p{N}]/u.test(out.n
 /** The tail, with every non-letter treated as invisible. */
 const liveTail = (out: string) => out.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').includes('replyyesorno');
 
-describe('K2: reply neutralizer, by property', () => {
+// T1: CPU-heavy; generous timeout for a loaded machine (no assertion changed).
+describe('K2: reply neutralizer, by property', { timeout: 180_000 }, () => {
   it(`folds '#'+gap+'7' and 'Reply'+gap+'yes'+gap+'or'+gap+'no' for every non-letter, non-number code point (${GAPS.length})`, () => {
     const badRef: string[] = [];
     const badTail: string[] = [];

@@ -20,7 +20,7 @@ describe('pairing code re-issue', () => {
   async function unpaired() {
     const created = await createOwnerWithAgent(w.setup, {
       householdId: w.household.id,
-      name: 'Alex',
+      name: 'Robin', // Q8: one first name per household
       timezone: 'Europe/London',
       transport: 'fake',
       agentAddress: 'violet-new',

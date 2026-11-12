@@ -3,8 +3,10 @@ import { z } from 'zod';
 import type { Clock } from '../clock.js';
 import type { ActionLog } from '../core/actionLog.js';
 import type { JobQueue } from '../core/jobs.js';
+import { storable } from '../core/outbound.js';
 import { sanitize } from '../core/sanitize.js';
-import { isoInZone, isoInstant } from '../brain/time.js';
+import { canonicalEventText } from '../approvals/eventText.js';
+import { isoInZone, isoInstant, MAX_DAYS_AHEAD, wholeMinute, withinHorizon } from '../brain/time.js';
 import type { Db, Queryable } from '../db/db.js';
 import type { CalendarProvider } from '../google/types.js';
 import type { ToolDef } from '../llm/tools.js';
@@ -53,52 +55,76 @@ export function effectiveWindow(conv: ConversationRow, side: SideRow): { start: 
 const MIN_EVENT_MS = 5 * 60_000;
 const MAX_EVENT_MS = DAY_MS;
 
+/** Stored field limits of a proposal: the propose schema and the owner's transcript (which shows them whole) read them here. */
+export const PROPOSE_MAX = { title: 120, location: 200, summary: 500 } as const;
+
 const eventInput = z.object({
-  title: z.string().min(1).max(120),
+  title: z.string().min(1).max(PROPOSE_MAX.title),
   start: isoInstant,
   end: isoInstant,
-  location: z.string().max(200).optional(),
+  location: z.string().max(PROPOSE_MAX.location).optional(),
   calendars: z.enum(['both', 'mine', 'theirs']).describe("Whose calendars: both owners', only your owner's, or only the other owner's"),
 });
 const proposeInput = z.object({
-  summary: z.string().min(1).max(500).describe('What both sides agree to, in one or two sentences'),
+  summary: z.string().min(1).max(PROPOSE_MAX.summary).describe('What both sides agree to, in one or two sentences'),
   events: z.array(eventInput).max(A2A_LIMITS.maxEvents).describe('0 to 5 events to book; none = an agreement with nothing to book'),
 });
 type ProposeInput = z.infer<typeof proposeInput>;
 
-const text = (s: string, max: number) => sanitize(s.replace(/\u0000/g, ''), max);
+/** Model-written text, made storable (U+0000 dropped, lone surrogates become U+FFFD; `jsonb` rejects both). */
+const text = (s: string, max: number) => sanitize(storable(s), max);
 
-/** Code validation of proposed events (I7): start < end, sane length, in the future, inside the window when there is one. */
+/**
+ * Code validation of proposed events (I7): start < end, sane length, in the future but at most
+ * MAX_DAYS_AHEAD days ahead, whole minutes (the prompt shows times to the minute), inside the
+ * window when there is one.
+ */
 export function checkEvents(events: Array<{ start: string; end: string }>, conv: ConversationRow, now: Date): void {
   for (const [i, e] of events.entries()) {
     const s = Date.parse(e.start);
     const t = Date.parse(e.end);
     const at = `events.${i}: `;
+    if (!wholeMinute(new Date(s)) || !wholeMinute(new Date(t))) throw new Refusal('invalid_event', `${at}times must be whole minutes (no seconds).`);
     if (t - s < MIN_EVENT_MS) throw new Refusal('invalid_event', `${at}end must be at least 5 minutes after start.`);
     if (t - s > MAX_EVENT_MS) throw new Refusal('invalid_event', `${at}an event can last at most 24 hours.`);
     if (s <= now.getTime()) throw new Refusal('invalid_event', `${at}that start is not in the future.`);
+    if (!withinHorizon(new Date(s), now)) throw new Refusal('invalid_event', `${at}an event can start at most ${MAX_DAYS_AHEAD} days from now.`);
     if (conv.window_start && conv.window_end && (s < conv.window_start.getTime() || t > conv.window_end.getTime())) {
       throw new Refusal('outside_window', `${at}events must be inside the conversation's window.`);
     }
   }
 }
 
-/** I5/I13: each owner's outcome prompt must show every event a yes would book (else refused). */
-function checkPromptFits(p: ProposalPayload, parties: Parties): void {
+/**
+ * I5/I13, what you see is what gets booked: BOTH owners' outcome prompts must show every event a
+ * yes would book with its whole title and location (and whose calendar it goes on), else refused.
+ */
+function checkPromptFits(p: ProposalPayload, parties: Parties, now: Date): void {
   for (const [me, peer] of [
     [parties.me, parties.peer],
     [parties.peer, parties.me],
   ] as const) {
-    const shownEvents = p.events.map((e) => ({ title: e.title, start: e.start, end: e.end, ...(e.location ? { location: e.location } : {}) }));
-    if (!outcomePromptFits({ peer: peer.first, summary: p.summary, events: shownEvents }, me.owner.timezone)) {
+    const shownEvents = p.events.map((e) => ({ title: e.title, start: e.start, end: e.end, ...(e.location ? { location: e.location } : {}), mine: e.agents.includes(me.agent.id) }));
+    if (!outcomePromptFits({ peer: peer.first, summary: p.summary, events: shownEvents }, me.owner.timezone, now)) {
       throw new Refusal(
         'prompt_too_long',
         p.events.length === 0
           ? 'Each owner must see the whole agreement in one short line: shorten the summary (about 180 characters at most).'
-          : 'Each owner must see every event in one short line: propose fewer events or shorter titles.',
+          : 'Each owner must see every event in full (title and location) in one short line: propose fewer events, or shorter titles or locations.',
       );
     }
   }
+}
+
+/**
+ * The canonical form of a title or location (what both prompts show and what is booked). It can
+ * be longer than the input (NFKC), so the stored limits are checked again here.
+ */
+function canonical(i: number, field: 'title' | 'location', raw: string, max: number): string {
+  const c = canonicalEventText(raw);
+  if (field === 'title' && c === '') throw new Refusal('invalid_event', `events.${i}: the title is empty.`);
+  if (c.length > max) throw new Refusal('invalid_event', `events.${i}: the ${field} is too long (at most ${max} characters).`);
+  return c;
 }
 
 export function envoyTools(d: EnvoyDeps): EnvoyTool[] {
@@ -156,12 +182,23 @@ export function envoyTools(d: EnvoyDeps): EnvoyTool[] {
         (e) => e.agents.includes(party.agent.id) && Date.parse(e.start) >= window.start.getTime() && Date.parse(e.end) <= window.end.getTime(),
       );
       if (inside.length === 0) continue;
-      const counted = await d.db.query(
-        `UPDATE a2a_sides SET availability_calls = availability_calls + 1 WHERE conversation_id = $1 AND agent_id = $2 AND availability_calls < $3`,
-        [ctx.conv.id, party.agent.id, A2A_LIMITS.availabilityPerSide],
-      );
-      if (counted.rowCount !== 1) continue; // no budget left: the booking guard checks it
-      if (!(await slotsFree(d, party.owner.id, inside))) free = false;
+      // I14: a paused owner's calendar is not read for anyone and their budget is not spent.
+      // Skipped like an unchecked side (nothing tells the other agent why); the booking guard
+      // re-checks after both owners said yes. The pause is read under the agent row's share
+      // lock, as the act does, and again after the read: a pause that landed during it drops the result.
+      const counted = await d.db.tx(async (tx) => {
+        const agent = await tx.query<{ paused: boolean }>('SELECT paused FROM agents WHERE id = $1 FOR SHARE', [party.agent.id]);
+        if (agent.rows[0]?.paused !== false) return false;
+        const res = await tx.query(
+          `UPDATE a2a_sides SET availability_calls = availability_calls + 1 WHERE conversation_id = $1 AND agent_id = $2 AND availability_calls < $3`,
+          [ctx.conv.id, party.agent.id, A2A_LIMITS.availabilityPerSide],
+        );
+        return res.rowCount === 1;
+      });
+      if (!counted) continue; // paused, or no budget left: the booking guard checks it
+      const slotFree = await slotsFree(d, party.owner.id, inside);
+      const pausedSince = await d.db.query<{ paused: boolean }>('SELECT paused FROM agents WHERE id = $1', [party.agent.id]);
+      if (!slotFree && pausedSince.rows[0]?.paused === false) free = false;
     }
     return free;
   }
@@ -240,16 +277,17 @@ export function envoyTools(d: EnvoyDeps): EnvoyTool[] {
       checkEvents(input.events, ctx.conv, ctx.now);
       const me = ctx.parties.me.agent.id;
       const peer = ctx.parties.peer.agent.id;
-      const events: ProposalEvent[] = input.events.map((e) => ({
-        title: text(e.title, 120),
+      // Stored as the owners' prompts show them (canonicalEventText), so a yes books exactly that.
+      const events: ProposalEvent[] = input.events.map((e, i) => ({
+        title: canonical(i, 'title', e.title, 120),
         start: e.start,
         end: e.end,
-        ...(e.location && text(e.location, 200) ? { location: text(e.location, 200) } : {}),
+        ...(e.location && canonicalEventText(e.location) ? { location: canonical(i, 'location', e.location, 200) } : {}),
         calendars: e.calendars,
         agents: e.calendars === 'both' ? [me, peer] : e.calendars === 'mine' ? [me] : [peer],
       }));
       const payload: ProposalPayload = { summary: text(input.summary, 500), events };
-      checkPromptFits(payload, ctx.parties);
+      checkPromptFits(payload, ctx.parties, ctx.now);
       return send(ctx, async (tx, conv, side) => {
         const m = await writeMessage(tx, d, { conv, from: me, kind: 'proposal', body: payload.summary, payload: { ...payload }, turnKey: ctx.turnKey, deliverTo: [peer] });
         await tx.query('UPDATE a2a_conversations SET live_proposal_seq = $2 WHERE id = $1', [conv.id, m.seq]);
@@ -271,7 +309,7 @@ export function envoyTools(d: EnvoyDeps): EnvoyTool[] {
       liveProposal(ctx.conv, input.proposal_seq);
       const p = proposal.payload as unknown as ProposalPayload;
       checkEvents(p.events, ctx.conv, ctx.now);
-      checkPromptFits(p, ctx.parties);
+      checkPromptFits(p, ctx.parties, ctx.now);
       const free = await acceptTimeFree(ctx, p);
       return send(ctx, async (tx, conv, side) => {
         if (proposal.from_agent_id !== peerOf(conv, side.agent_id)) throw new Refusal('own_proposal', 'You cannot accept your own proposal.');
