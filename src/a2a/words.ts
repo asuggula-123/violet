@@ -1,3 +1,4 @@
+import { storable } from '../core/outbound.js';
 import { sanitize } from '../core/sanitize.js';
 
 /**
@@ -39,9 +40,9 @@ export const COMMON_WORDS: ReadonlySet<string> = new Set(
    one two three four five six seven eight nine ten half quarter`.split(/\s+/),
 );
 
-/** Text the owner's Violet released: one line, NFKC, inner double quotes made single, number signs dropped (so the prompt shows it exactly). */
+/** Text the owner's Violet released: storable, one line, NFKC, inner double quotes made single, number signs dropped (so the prompt shows it exactly). */
 export function canonicalRelease(text: string, max: number): string {
-  return sanitize(sanitize(text.normalize('NFKC'), max).replace(/["“”„‟″‶❝❞〝-〟＂]/g, "'").replace(/[#＃﹟]/g, ''), max);
+  return sanitize(sanitize(storable(text).normalize('NFKC'), max).replace(/["“”„‟″‶❝❞〝-〟＂]/g, "'").replace(/[#＃﹟]/g, ''), max);
 }
 
 const significant = (t: string, allowed: ReadonlySet<string>) => !STOP_WORDS.has(t) && !allowed.has(t);

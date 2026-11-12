@@ -1,5 +1,6 @@
 import { addMs } from '../../clock.js';
 import { promptSummary } from '../../approvals/repo.js';
+import { storable } from '../../core/outbound.js';
 import { z } from 'zod';
 import { sha256 } from '../memo.js';
 import { formatDateTime, isoInZone, isoInstant, parseInstant } from '../time.js';
@@ -36,7 +37,7 @@ export function memoryTools(d: BrainToolDeps): BrainTool[] {
       const res = await d.db.query(
         `INSERT INTO contact_notes (id, agent_id, contact_id, subject, body, created_at) VALUES ($1, $2, NULL, $3, $4, $5)
          ON CONFLICT (id) DO NOTHING`,
-        [id, ctx.agent.id, input.about, input.note, d.clock.now()],
+        [id, ctx.agent.id, storable(input.about), storable(input.note), d.clock.now()],
       );
       if (res.rowCount === 1) {
         await d.actionLog.write({ agentId: ctx.agent.id, actor: 'brain', action: 'note.saved', detail: { noteId: id, messageId: ctx.turn.messageId } });

@@ -44,7 +44,7 @@ the same commit.
    structured data. Only a real inbound owner message can resolve an approval.
    **What you see is what gets booked:** every text field written to a calendar
    appears in full in the prompt the owner answers (stored in the form the prompt
-   shows; NUL dropped and lone surrogates as U+FFFD, which `jsonb` rejects), with the full date and time (`exactRange`); what does not fit is refused,
+   shows; NUL dropped and lone surrogates as U+FFFD, which `jsonb` rejects; all tool input from the model is made storable this way at the tool loop, before validation), with the full date and time (`exactRange`); what does not fit is refused,
    never cut. CalendarWriter checks it again before writing: a title or location
    missing from the stored prompt (a row stored before this rule) is not booked.
 6. **Everything is logged.** `action_log` is append-only.
@@ -277,6 +277,8 @@ runToolLoop({ llm, system, systemDynamic?, messages, tools, execute(tool, input,
 // LlmError ends the loop with stopReason 'deadline'. unrunTools: the last response asked for tools that never ran.
 // models: served models in order of first use; fallback: any response came from the refusal fallback.
 // One step = one model call. Every tool_use gets one tool_result (all in one user message).
+// Before validation each call's name, id and input are made storable (storableInput: every string and
+// object key through storable(), NUL dropped, lone surrogates U+FFFD), so every tool and log sees that text.
 // Unknown name / zod-invalid input → is_error result + onDenied ('unknown_tool'|'invalid_input').
 // Handler error → is_error with err.ownerMessage (string) or a generic text — never internals.
 // max_tokens: tools in that response never run. pause_turn: call again. Assistant content verbatim.

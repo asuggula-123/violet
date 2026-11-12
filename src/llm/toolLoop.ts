@@ -1,3 +1,4 @@
+import { storable } from '../core/outbound.js';
 import { isLlmError } from './errors.js';
 import { safeToolMessage, type ToolDef, type ToolRegistry } from './tools.js';
 import type { LlmBlock, LlmClient, LlmMessage, LlmRequestMeta, LlmResponse, LlmUsage } from './types.js';
@@ -113,17 +114,20 @@ export async function runToolLoop<C>(o: ToolLoopOptions<C>): Promise<ToolLoopRes
 
     const results: LlmBlock[] = [];
     for (const call of calls) {
-      toolNames.push(call.name);
-      results.push(await runCall(o, call));
+      // One door: what the model wrote is made storable before anything sees it (the
+      // assistant content above, echoed back to the API, stays as it came).
+      const clean: ToolCall = { id: storable(call.id), name: storable(call.name), input: storableInput(call.input) as Record<string, unknown> };
+      toolNames.push(clean.name);
+      results.push(await runCall(o, clean, call.id));
     }
     messages.push({ role: 'user', content: results });
   }
 }
 
-async function runCall<C>(o: ToolLoopOptions<C>, call: ToolCall): Promise<LlmBlock> {
+async function runCall<C>(o: ToolLoopOptions<C>, call: ToolCall, toolUseId: string): Promise<LlmBlock> {
   const result = (content: string, isError = false): LlmBlock => ({
     type: 'tool_result',
-    tool_use_id: call.id,
+    tool_use_id: toolUseId,
     content,
     ...(isError ? { is_error: true } : {}),
   });
@@ -144,6 +148,19 @@ async function runCall<C>(o: ToolLoopOptions<C>, call: ToolCall): Promise<LlmBlo
   } catch (err) {
     return result(safeToolMessage(err), true);
   }
+}
+
+/**
+ * Tool input from the model, made storable (Postgres rejects U+0000 and lone surrogates):
+ * a deep copy in which every string and every object key goes through storable(). Real
+ * surrogate pairs, numbers, booleans and null are unchanged; a second pass changes nothing.
+ */
+export function storableInput(value: unknown): unknown {
+  if (typeof value === 'string') return storable(value);
+  if (Array.isArray(value)) return value.map(storableInput);
+  // fromEntries defines own properties, so a key named __proto__ stays a plain key.
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [storable(k), storableInput(v)]));
+  return value;
 }
 
 function isToolUse(b: LlmBlock): b is ToolCall & LlmBlock {
