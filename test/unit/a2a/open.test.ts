@@ -39,11 +39,14 @@ describe('a2a open conversation (not about times)', () => {
     // D4: the open question reaches the Brain as untrusted data (and taints the turn) …
     expect(samBrain.systemDynamic).toMatch(/Open questions from your Envoy[\s\S]*<untrusted source="agent">[\s\S]*Can you pick up the kids on Thursday\?/);
     expect((await w.actions({ action: 'brain.turn', agentId: w.sam.agent.id })).at(-1)!.detail.tainted).toBe(true);
-    // … but Sam said every word herself (I11 round 3: names count, so the Brain relays her own phrasing), so the guidance goes out without a hold.
+    // … so (I20) the guidance is held for Sam's yes on the exact words, even though they are her own; nothing crosses before it.
+    expect(w.textsTo(w.sam.address)).toContain('#1 Tell Alex\'s Violet: “Yes, I can pick up the kids on Thursday.” Send? Reply yes or no.');
+    expect((await a2aMessages(w)).map((m) => m.kind)).toEqual(['open', 'question']);
+    await w.ownerSays(w.sam, 'yes');
     expect(w.textsTo(w.sam.address)).toContain('Told Alex\'s Violet: “Yes, I can pick up the kids on Thursday.”');
     const prompt = '#1 With Sam: agreed “Sam picks up the kids on Thursday.”. OK? Reply yes or no.';
     expect(w.lastTo(w.alex.address)).toBe(prompt);
-    expect(w.lastTo(w.sam.address)).toBe('#1 With Alex: agreed “Sam picks up the kids on Thursday.”. OK? Reply yes or no.');
+    expect(w.lastTo(w.sam.address)).toBe('#2 With Alex: agreed “Sam picks up the kids on Thursday.”. OK? Reply yes or no.');
 
     await w.ownerSays(w.sam, 'yes');
     expect(w.lastTo(w.sam.address)).toBe('Waiting for Alex.');

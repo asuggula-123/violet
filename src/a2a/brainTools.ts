@@ -20,6 +20,9 @@ const talkInput = z.object({
   window_start: isoInstant.optional().describe('Start of the time window the agents may discuss (ISO 8601 with offset)'),
   window_end: isoInstant.optional().describe('End of the window: at most 31 days after window_start'),
 });
+const MINUTE_MS = 60_000;
+const minuteFloor = (d: Date) => new Date(Math.floor(d.getTime() / MINUTE_MS) * MINUTE_MS);
+const minuteCeil = (d: Date) => new Date(Math.ceil(d.getTime() / MINUTE_MS) * MINUTE_MS);
 const tellInput = conversationInput.extend({ guidance: z.string().min(1).max(600).describe('What your Envoy should know or do next. It may reach the other agent.') });
 
 /**
@@ -66,7 +69,11 @@ export function a2aBrainTools(d: A2ADeps, releases: ReturnType<typeof createRele
           throw new ToolError(`There is no agent for “${sanitize(input.with, 60)}” in your household.`);
         }
         if ((input.window_start === undefined) !== (input.window_end === undefined)) throw new ToolError('Give both window_start and window_end, or neither.');
-        const window = input.window_start && input.window_end ? { start: new Date(input.window_start), end: new Date(input.window_end) } : null;
+        // I20: the window crosses too, and the release prompt shows it to the minute (releaseWindowText,
+        // with the year and UTC offset when they are not otherwise certain),
+        // so it is kept to the minute: start rounded down, end rounded up. Nothing crosses at a
+        // precision the owner was not shown (seconds could carry hidden data in a tainted turn).
+        const window = input.window_start && input.window_end ? { start: minuteFloor(new Date(input.window_start)), end: minuteCeil(new Date(input.window_end)) } : null;
         if (window) {
           if (window.end.getTime() <= window.start.getTime()) throw new ToolError('window_end must be after window_start.');
           if (window.end.getTime() <= ctx.now.getTime()) throw new ToolError('The window is already over.');
@@ -80,8 +87,10 @@ export function a2aBrainTools(d: A2ADeps, releases: ReturnType<typeof createRele
             peerLabel: `${firstName(found.name)}'s ${sanitize(found.agent_name, 40)}`,
             topic: canonicalRelease(input.topic, 80),
             text: canonicalRelease(input.brief, 600),
-            windowStart: input.window_start ?? null,
-            windowEnd: input.window_end ?? null,
+            windowStart: window ? window.start.toISOString() : null,
+            windowEnd: window ? window.end.toISOString() : null,
+            timezone: ctx.owner.timezone,
+            requestedAt: ctx.now.toISOString(),
           },
           window,
         );

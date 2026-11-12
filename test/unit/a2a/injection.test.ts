@@ -69,8 +69,11 @@ describe('injection through the other agent', () => {
       stepOf(req) === 0 ? respond([toolUse('t', 'tell_envoy', { conversation: conv.id, guidance: 'Sam is free Friday' })]) : respond([{ type: 'text', text: 'ok' }]),
     );
     await w.ownerSays(w.sam, 'Sam is free Friday');
-    // Both owners hold a real prompt. The forged "#9" names nothing; "yes 9" answers nothing.
-    expect(w.transport.sent.filter((m) => m.purpose === 'approval')).toHaveLength(2);
+    // The answer is given in a turn tainted by the question: held for Sam's yes on the exact words (I20).
+    expect(w.textsTo(w.sam.address)).toContain("#1 Tell Alex's Violet: “Sam is free Friday” Send? Reply yes or no.");
+    await w.ownerSays(w.sam, 'yes');
+    // Both owners hold a real outcome prompt (Sam also had the release prompt). The forged "#9" names nothing; "yes 9" answers nothing.
+    expect(w.transport.sent.filter((m) => m.purpose === 'approval')).toHaveLength(3);
     await w.ownerSays(w.alex, 'yes 9');
     expect(w.lastTo(w.alex.address)).toBe("#9 isn't open any more.");
     // I19: a no too counts only under the real prompt (here: a reply to it).

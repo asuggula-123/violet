@@ -12,6 +12,9 @@ dinner. Nothing happens until the people involved say yes.
 - It plans with another person's Violet (for example, dinner on Friday). From your
   calendar and email, only busy times cross; what you ask it to say is passed on. Both
   calendars are booked only after both people say yes.
+- Once your Violet has seen another agent's words, an email or your calendar details, it
+  shows you the exact words (and the time window) before passing anything from you to
+  another agent.
 - Strangers get one fixed reply: it is an AI and has taken the message. The message
   goes in your digest.
 - A typed yes or no counts only right under Violet's question; otherwise Violet shows the
@@ -98,8 +101,18 @@ process; `TEST_DATABASE_URL=postgres://… npm run test:pg` runs them on a real 
 - A typed yes or no relies on Telegram numbering a chat's messages in order. This is not
   yet checked against live Telegram; if it is off, Violet asks again and the buttons still work.
 - The clash check cannot tell events marked "free" from busy ones.
-- After reading email or calendar details, what it tells another agent is held for the
-  owner's yes more often than needed (safe first; to be tuned).
+- Once it has read email, calendar details or another agent's words, everything it tells
+  another agent waits for your yes on the exact words, even your own words. Each reply your
+  Violet writes while this applies counts as such text too, so it does not wear off by
+  itself: from then on, every instruction to another agent costs one more tap (the yes).
+  When one message makes Violet ask twice, a typed answer counts only for the question
+  right above it: after your first yes, Violet shows the second question again and your
+  next yes answers it (the buttons answer each one directly).
+- A model fooled by an email or another agent can still tell you untrue things in its own
+  reply, including text that looks like Violet's notices or prompts. It cannot act on
+  them: only a real prompt and your answer do anything.
+- If you write in Hebrew, Arabic or another right-to-left script, `#` shows as `№` in
+  those messages.
 - Vendor docs could not be opened while building: check the Fly and Google steps in
   `docs/DEPLOY.md` against current docs and prices, and the Gmail permission
   `gmail.drafts.create` against Google's consent screen (fallback in DEPLOY.md).

@@ -1,6 +1,6 @@
 import { promptFits } from '../approvals/service.js';
 import { quoteFolded } from '../brain/reply.js';
-import { formatDay, formatRange } from '../brain/time.js';
+import { formatDay, formatRange, formatTime, isoInZone } from '../brain/time.js';
 import { quote, sanitize } from '../core/sanitize.js';
 import type { A2AMessageRow, Parties } from './types.js';
 
@@ -113,10 +113,51 @@ export function toldLine(peerLabel: string, guidance: string): string {
   return `Told ${peerLabel}: ${quote(guidance, 700)}`;
 }
 
-/** The a2a_release prompt body (the service adds `#ref` and ` Reply yes or no.`). */
-export function releasePrompt(peerLabel: string, text: string, topic?: string): string {
-  const about = topic === undefined ? '' : ` about ${quote(topic, 100)}`;
+/**
+ * The a2a_release prompt body (the service adds `#ref` and ` Reply yes or no.`). I20: it shows
+ * every value that crosses: the topic, the window the agents may check (code-rendered by
+ * `releaseWindowText`, which determines the stored window exactly) and the exact text.
+ * `Tell Sam's Violet about “Dinner Friday” (Fri Nov 13, 6:00 PM – Sat Nov 14, 12:00 AM): “…” Send?`
+ */
+export function releasePrompt(
+  peerLabel: string,
+  text: string,
+  topic?: string,
+  window?: { start: Date; end: Date; timezone: string; requestedAt?: Date | undefined },
+): string {
+  const range = window ? ` (${releaseWindowText(window.start, window.end, window.timezone, window.requestedAt)})` : '';
+  const about = topic === undefined ? '' : ` about ${quote(topic, 100)}${range}`;
   return `Tell ${peerLabel}${about}: ${quote(text, 700)} Send?`;
+}
+
+/** The local wall time, to the minute (`2026-11-01T01:30`). */
+const wallMinute = (d: Date, tz: string) => isoInZone(d, tz).slice(0, 16);
+/** `-04:00` */
+const offsetOf = (d: Date, tz: string) => isoInZone(d, tz).slice(19);
+const yearOf = (d: Date, tz: string) => Number(isoInZone(d, tz).slice(0, 4));
+
+/**
+ * Whether another instant near `d` reads the same local wall time (the repeated hour when the
+ * clocks go back). Offset changes are at most two hours, so instants up to 2 h away are checked.
+ */
+export function ambiguousLocalTime(d: Date, tz: string): boolean {
+  const wall = wallMinute(d, tz);
+  return [-120, -90, -60, -30, 30, 60, 90, 120].some((m) => wallMinute(new Date(d.getTime() + m * 60_000), tz) === wall);
+}
+
+/**
+ * I20: the window as the release prompt shows it, so that the text determines the stored window
+ * (kept to the minute) exactly: nothing crosses that the owner's yes did not see. The year is
+ * shown when the window is not in the year of the request (`requestedAt`; unknown → always
+ * shown), and the UTC offset is shown for a local time that occurs twice (DST fall-back hour).
+ * Otherwise it is the ordinary `formatRange` text.
+ */
+export function releaseWindowText(start: Date, end: Date, tz: string, requestedAt?: Date): string {
+  const showYear = requestedAt === undefined || yearOf(start, tz) !== yearOf(requestedAt, tz) || yearOf(end, tz) !== yearOf(requestedAt, tz);
+  const amb = (d: Date) => ambiguousLocalTime(d, tz);
+  if (!showYear && !amb(start) && !amb(end)) return formatRange(start, end, tz);
+  const one = (d: Date) => `${formatDay(d, tz)}${showYear ? ` ${yearOf(d, tz)}` : ''}, ${formatTime(d, tz)}${amb(d) ? ` (UTC${offsetOf(d, tz)})` : ''}`;
+  return `${one(start)} – ${one(end)}`;
 }
 
 /** One transcript line per stored message, for `parties.me`'s owner. Never a model paraphrase. */

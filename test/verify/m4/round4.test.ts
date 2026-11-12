@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { neutralizeReply } from '../../../src/brain/reply.js';
 import { shown } from '../../../src/a2a/render.js';
-import { ownerSaidIt } from '../../../src/a2a/words.js';
+import { expectEveryReleaseHeld } from '../../unit/i20/held.js';
 import { createTestWorld, type TestWorld } from '../../helpers/world.js';
 import { a2aMessages, FRI, respond, scriptEnvoy, stepOf, toolUse } from '../../unit/a2a/helpers.js';
 
@@ -58,15 +58,18 @@ describe('M4 verify round 4', () => {
   });
 
   // ---------------------------------------------------------------- I11: round-3 fix re-checked
-  it('I11 (unit): names keep the owner phrasing — swap, add, repeat and covert sequences fail; owner phrasing passes', () => {
-    const names = ['Violet', 'Alex', 'Violet', 'Sam'];
-    expect(ownerSaidIt('Tell Sam that Alex will pick up the kids', ['kids', 'Sam will pick up the kids'], names)).toBe(false);
-    expect(ownerSaidIt('Tell Sam that Alex will pick up the kids', ['kids', 'Alex will pick up the kids'], names)).toBe(true);
-    expect(ownerSaidIt('Tell Sam I am home Friday', ['Friday', 'Alex Sam home Friday'], names)).toBe(false);
-    expect(ownerSaidIt('Tell Sam I am home Friday', ['Friday', 'Sam Sam home Friday'], names)).toBe(false);
-    expect(ownerSaidIt('Tell Sam I am home Friday', ['Friday', 'Violet Violet Violet home Friday'], names)).toBe(false);
-    // Only glue words and names: never passes vacuously.
-    expect(ownerSaidIt('Tell Sam that Alex is not', ['Alex is not'], names)).toBe(false);
+  // I20 removed ownerSaidIt; these cases now run against the real release path, where a
+  // tainted turn's release is always held (the owner-phrasing case included).
+  it('I11 (unit → I20): names keep the owner phrasing — swap, add, repeat and covert sequences are held; so is owner phrasing', async () => {
+    await expectEveryReleaseHeld([
+      { ownerText: 'Tell Sam that Alex will pick up the kids', texts: ['kids', 'Sam will pick up the kids'] },
+      { ownerText: 'Tell Sam that Alex will pick up the kids', texts: ['kids', 'Alex will pick up the kids'] },
+      { ownerText: 'Tell Sam I am home Friday', texts: ['Friday', 'Alex Sam home Friday'] },
+      { ownerText: 'Tell Sam I am home Friday', texts: ['Friday', 'Sam Sam home Friday'] },
+      { ownerText: 'Tell Sam I am home Friday', texts: ['Friday', 'Violet Violet Violet home Friday'] },
+      // Only glue words and names.
+      { ownerText: 'Tell Sam that Alex is not', texts: ['Alex is not'] },
+    ]);
   });
 
   it('I11: tainted turn, a name moved next to different owner words is held (integration, real release path)', async () => {

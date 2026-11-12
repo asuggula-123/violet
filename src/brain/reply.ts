@@ -1,5 +1,5 @@
 /**
- * K2 / principle 5: a model reply must not look like an approval prompt. Only prompts the
+ * K2 / principle 5, best effort: a model reply should not look like an approval prompt. Only prompts the
  * approval service renders carry `#<ref>` and the tail "Reply yes or no.". This runs on every
  * model reply (purpose 'reply') and on every agent-authored text an owner is shown (a2a
  * `shown()`, stranger text in the digest via `quoteFolded`). It does not try to know which
@@ -8,7 +8,9 @@
  *
  *  1. Invisible characters are removed: Cf and every Default_Ignorable_Code_Point (this
  *     includes the blank-rendering *letters*: the Hangul fillers are Lo and Default_Ignorable).
- *     Kept: a zero-width joiner between two emoji, a variation selector right after an emoji.
+ *     Kept: a zero-width joiner between two emoji, a variation selector right after an emoji,
+     and a zero-width non-joiner between two Arabic-script letters (Persian spelling: `می‌بینمت`
+     would otherwise join wrongly; text with an Arabic letter folds every sign anyway).
  *  2. Each remaining code point, AS WRITTEN, is a sign, a number, a letter, a mark or a GAP:
  *     - strong sign: anything whose NFKC form contains `#`, and the look-alikes ♯ ⌗ ⋕ ⧣ ⩩ ▦ ▩ ╪ ╫ ╬ 井 丼
  *       and the musical sharps U+1D130–U+1D132;
@@ -38,17 +40,27 @@
  *  6. Steps 1–5 repeat until the text no longer changes (normally one round), so the function is
  *     idempotent.
  *
- * The ref fold (3) is the main guarantee: a forged prompt names no `#<ref>`, and the resolver
- * acts only on a real pending approval, booking its stored payload; the tail fold (5) is a
- * second layer. What remains, documented in docs/ARCHITECTURE.md 8.2: a weak symbol (outside the
- * strong list) followed by a digit-shaped LETTER is not folded, and a tail with four or more
- * look-alike letters outside the data is not folded (the ref fold still holds).
+ * The ref fold (3) makes a forged prompt harder to mistake for a real one and the tail fold (5)
+ * is a second layer; neither is a guarantee (the resolver acts only on a real pending approval,
+ * booking its stored payload). Known gaps, documented in docs/ARCHITECTURE.md 8.2: a weak symbol
+ * (outside the strong list) followed by a digit-shaped LETTER is not folded, and a tail with four
+ * or more look-alike letters outside the data is not folded.
  *
  * What the owner sees for ordinary text: "#1 priority" → "№1 priority", "#love" / "#lol" →
  * "№love" / "№lol" (l o read as 1 0), "#a7" → "№a7", "#straße" → "№straße", "#東京" → "№東京",
  * "C#" at the very end → "C№", "C♯7" → "C№7", "⊕ 5" → "№ 5", "reply yes or no to Sam" → "say yes
  * or no to Sam"; "#friends", "#café", "#iPhone", "C# is", "井戸", "★ 5 stars", "≤ 5" and all other
  * text are unchanged apart from NFKC and removed invisible characters.
+ *
+ * Right-to-left text: when the text contains ANY right-to-left code point (RIGHT_TO_LEFT),
+ * every strong and weak sign folds, ASCII '#' included, whatever follows it. Step 3 decides on
+ * logical order, which equals the order the owner sees only when there is no right-to-left
+ * character and no bidi control (those are Cf, already removed in step 1); with one, the
+ * Bidirectional Algorithm can draw a sign written after the digits in front of them. So an
+ * owner who writes Hebrew or Arabic sees `#` as `№` in such messages.
+ *
+ * This is a best-effort layer (docs/ARCHITECTURE.md 8.2): it reduces confusion; no safety
+ * property rests on it.
  */
 import { quote, sanitize } from '../core/sanitize.js';
 import { DIGIT_LIKE_LETTERS, TAIL_CONFUSABLES } from './confusables.js';
@@ -59,6 +71,8 @@ const EMOJI_BEFORE = /\p{Extended_Pictographic}[\u{FE0F}\u{1F3FB}-\u{1F3FF}]?$/u
 const EMOJI_BEFORE_VS = /\p{Extended_Pictographic}$/u;
 const EMOJI_AFTER = /^\p{Extended_Pictographic}/u;
 const LETTER = /^\p{L}$/u;
+/** A ZWNJ between two Arabic-script letters is spelling (Persian `می‌بینمت`), not a hidden gap. */
+const ARABIC_LETTER = /^(?=\p{L})\p{Script=Arabic}$/u;
 const NUMBER = /\p{N}/u;
 const HAS_LETTER = /\p{L}/u;
 /** Modifier letters (ʼ ˈ ʰ …) read as punctuation or marks: gaps in the tail stream. */
@@ -69,6 +83,13 @@ const MARK = /\p{M}/gu;
 const IS_MARK = /^\p{M}$/u;
 const PLAIN_SKELETON = /^[A-Za-z]$/u;
 const CJK = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]$/u;
+/**
+ * The blocks Unicode reserves for right-to-left scripts (default Bidi_Class R / AL; checked
+ * against the Script property: every Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic,
+ * Adlam, Hanifi Rohingya, … code point lies inside). Not a list of scripts: a new RTL script
+ * is encoded inside these blocks.
+ */
+const RIGHT_TO_LEFT = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
 /** Stand-in for a letter whose skeleton is not ASCII, in the tail stream (step 5). */
 const WILD = '\u0000';
 /** At most this many such letters in one tail match (a quarter of its 12 letters). */
@@ -160,6 +181,7 @@ function visibleCodePoints(text: string): string[] {
     const before = out.slice(-2).join('');
     if (ch === '\u200D' && EMOJI_BEFORE.test(before) && EMOJI_AFTER.test(cps[i + 1] ?? '')) out.push(ch);
     else if ((ch === '\uFE0F' || ch === '\uFE0E') && EMOJI_BEFORE_VS.test(before)) out.push(ch);
+    else if (ch === '\u200C' && ARABIC_LETTER.test(out[out.length - 1] ?? '') && ARABIC_LETTER.test(cps[i + 1] ?? '')) out.push(ch);
   }
   return out;
 }
@@ -168,7 +190,8 @@ function visibleCodePoints(text: string): string[] {
  * Step 3, right to left, linear. A strong sign is kept only when its next non-gap (signs and
  * marks skipped) begins a WORD: a run of at least two plain letters (marks inside it allowed),
  * whose first two letters are not both digit-like, that ends at a gap, a sign or the end of the
- * text (not at a number or another kind of letter). Everything else folds — fail closed, so no
+ * text (not at a number or another kind of letter); in text with a right-to-left code point
+ * every sign folds (see the header). Everything else folds — fail closed, so no
  * list of digit-shaped letters is load-bearing: "#ʒ7", "#ƻ7", "#Зl", "#a7", "#lo", "#東京" fold;
  * "#bring", "#friends", "C# is" stay. 井 and 丼 (letters themselves) also stay before a cjk
  * letter ("井戸", "牛丼です"). A weak sign folds only when its next non-gap (weak signs count) is
@@ -176,6 +199,12 @@ function visibleCodePoints(text: string): string[] {
  */
 function foldRefs(cps: string[], kinds: Kind[], out: string[]): void {
   const n = kinds.length;
+  if (cps.some((cp) => RIGHT_TO_LEFT.test(cp))) {
+    kinds.forEach((k, i) => {
+      if (k === 'strong' || k === 'weak') out[i] = FOLD_MARK;
+    });
+    return;
+  }
   const runLen = new Array<number>(n).fill(0);
   const second = new Array<number>(n).fill(-1);
   const term = new Array<Kind | 'end'>(n).fill('end');

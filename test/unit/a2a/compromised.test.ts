@@ -137,8 +137,12 @@ describe('a compromised own Envoy: every rule holds in code', () => {
     w.llm.on({ agentId: w.sam.agent.id, mind: 'brain' }, (req) =>
       stepOf(req) === 0 ? respond([toolUse('t', 'tell_envoy', { conversation: conv.id, guidance: 'Friday ok' })]) : respond([{ type: 'text', text: 'ok' }]),
     );
+    // Each answer is given in a turn tainted by the open question, so it is held for Sam's yes (I20).
     await w.ownerSays(w.sam, 'Friday ok');
+    await w.ownerSays(w.sam, 'yes');
     await w.ownerSays(w.sam, 'friday ok again');
+    await w.ownerSays(w.sam, 'yes');
+    expect(w.textsTo(w.sam.address).filter((t) => t.endsWith('Send? Reply yes or no.'))).toHaveLength(2);
     expect(w.textsTo(w.sam.address).filter((t) => t.includes('asks:'))).toHaveLength(2);
     expect(await refusals(w)).toEqual(['limit:questions_per_side']);
   });

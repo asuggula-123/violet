@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { ownerSaidIt, privateMatches } from '../../../src/a2a/words.js';
+import { privateMatches } from '../../../src/a2a/words.js';
+import { expectEveryReleaseHeld } from '../i20/held.js';
 import { createTestWorld, type TestWorld } from '../../helpers/world.js';
 import { a2aMessages, envoyCalls, FRI, lastResults, onlyConversation, respond, stepOf, toolUse } from './helpers.js';
 import { brainCalls } from '../brain/script.js';
@@ -22,32 +23,29 @@ describe('EgressGuard phrase match (words.ts)', () => {
     expect(privateMatches('Dr Ng at 5', 'tell her I see dr ng at 5', fields, names)).toEqual([]);
     expect(privateMatches('forms for school', '', ['forms'], names)).toEqual(['forms']);
   });
-  it('owner-verbatim: every word typed by the owner, names included and in the owner\'s own phrasing', () => {
-    expect(ownerSaidIt('yes Sam can pick up the kids on thursday', ['Yes, Sam can pick up the kids on Thursday.'], ['Sam'])).toBe(true);
-    // A name the owner did not type is not theirs (round 3: names are counted like any token).
-    expect(ownerSaidIt('yes I can pick up the kids on thursday', ['Yes, Sam can pick up the kids on Thursday.'], ['Sam'])).toBe(false);
-    expect(ownerSaidIt('yes', ['Yes, Sam can pick up the kids on Thursday.'], ['Sam'])).toBe(false);
-    expect(ownerSaidIt('Café at 7?', ['cafe at 7'], [])).toBe(true);
-  });
 
-  it('owner-verbatim fails closed: no vacuous pass, no glue word the owner did not type, no repetition', () => {
-    expect(ownerSaidIt('ping Sam', ['no yes no no yes yes no yes the a an the a the an a'], ['Sam'])).toBe(false);
-    expect(ownerSaidIt('ping Sam', ['🙂 !!! ...'], ['Sam'])).toBe(false);
-    expect(ownerSaidIt('ping Sam', ['Sam'], ['Sam'])).toBe(false);
-    expect(ownerSaidIt('Tell Sam Alex will be home Friday', ['Alex will not be home Friday'], ['Sam', 'Alex'])).toBe(false);
-    expect(ownerSaidIt('Tell Sam Alex will be home Friday', ['Alex will be home Friday'], ['Sam', 'Alex'])).toBe(true);
-    expect(ownerSaidIt('dinner friday', ['dinner dinner friday friday'], [])).toBe(false);
-    // Names: no adding, repeating, swapping or moving them (who does what cannot flip; no covert name sequence).
-    const names = ['Violet', 'Alex', 'Violet', 'Sam'];
-    expect(ownerSaidIt('Tell Sam that Alex will pick up the kids', ['Sam will pick up the kids'], names)).toBe(false);
-    expect(ownerSaidIt('Tell Sam that Alex will pick up the kids', ['kids', 'Alex will pick up the kids'], names)).toBe(true);
-    expect(ownerSaidIt('Alex will pick up and Sam will drop off', ['Sam will pick up'], names)).toBe(false);
-    expect(ownerSaidIt('Alex will pick up and Sam will drop off', ['Sam will drop off'], names)).toBe(true);
-    expect(ownerSaidIt('Tell Sam I am home Friday', ['Alex Sam home Friday'], names)).toBe(false);
-    expect(ownerSaidIt('Tell Sam Alex Alex is home Friday', ['Alex is home Friday Alex'], names)).toBe(false);
-    expect(ownerSaidIt('Alex Sam', ['Alex Sam'], names)).toBe(false);
-    // Only the owner's own glue words, mostly glue: too little meaning to vouch for.
-    expect(ownerSaidIt('is it the one or the other, and is it on or off for the kids', ['the or the and is it on or the off it is kids'], [])).toBe(false);
+  // I20: the owner-verbatim exception is gone. Its cases (those it let through and those it
+  // held) all run here against the real release path in a tainted turn: every one is held.
+  it('the former owner-verbatim cases: in a tainted turn every release is held, whoever typed the words', async () => {
+    await expectEveryReleaseHeld([
+      { ownerText: 'yes Sam can pick up the kids on thursday', texts: ['Yes, Sam can pick up the kids on Thursday.'] },
+      { ownerText: 'yes I can pick up the kids on thursday', texts: ['Yes, Sam can pick up the kids on Thursday.'] },
+      { ownerText: 'Café at 7?', texts: ['cafe at 7'] },
+      { ownerText: 'ping Sam', texts: ['no yes no no yes yes no yes the a an the a the an a'] },
+      { ownerText: 'ping Sam', texts: ['🙂 !!! ...'] },
+      { ownerText: 'ping Sam', texts: ['Sam'] },
+      { ownerText: 'Tell Sam Alex will be home Friday', texts: ['Alex will not be home Friday'] },
+      { ownerText: 'Tell Sam Alex will be home Friday', texts: ['Alex will be home Friday'] },
+      { ownerText: 'dinner friday', texts: ['dinner dinner friday friday'] },
+      { ownerText: 'Tell Sam that Alex will pick up the kids', texts: ['Sam will pick up the kids'] },
+      { ownerText: 'Tell Sam that Alex will pick up the kids', texts: ['kids', 'Alex will pick up the kids'] },
+      { ownerText: 'Alex will pick up and Sam will drop off', texts: ['Sam will pick up'] },
+      { ownerText: 'Alex will pick up and Sam will drop off', texts: ['Sam will drop off'] },
+      { ownerText: 'Tell Sam I am home Friday', texts: ['Alex Sam home Friday'] },
+      { ownerText: 'Tell Sam Alex Alex is home Friday', texts: ['Alex is home Friday Alex'] },
+      { ownerText: 'Alex Sam', texts: ['Alex Sam'] },
+      { ownerText: 'is it the one or the other, and is it on or off for the kids', texts: ['the or the and is it on or the off it is kids'] },
+    ]);
   });
 });
 
@@ -82,7 +80,7 @@ describe('releases (I11) with a compromised Brain', () => {
       [respond([toolUse('r', 'read_email', { id: 'm1' })]), respond([talk(brief)]), respond([{ type: 'text', text: 'Waiting for your yes.' }])][Math.min(stepOf(req), 2)]!,
     );
     await w.ownerSays(w.alex, 'Set up dinner with Sam');
-    expect(w.textsTo(w.alex.address)).toContain(`#1 Tell Sam's Violet about “Dinner Friday”: “${brief}” Send? Reply yes or no.`);
+    expect(w.textsTo(w.alex.address)).toContain(`#1 Tell Sam's Violet about “Dinner Friday” (Fri Nov 13, 12:00 AM – Sat Nov 14, 12:00 AM): “${brief}” Send? Reply yes or no.`);
     expect(await a2aMessages(w)).toEqual([]);
     expect((await w.actions({ action: 'a2a.release_held' })).length).toBe(1);
     await w.ownerSays(w.alex, 'yes');
@@ -101,13 +99,19 @@ describe('releases (I11) with a compromised Brain', () => {
     expect(await a2aMessages(w)).toEqual([]);
   });
 
-  it('owner-verbatim exception: in a tainted turn, text the owner typed goes out without a hold', async () => {
+  it("I20: in a tainted turn, even the owner's own words are held; after the yes exactly those words cross", async () => {
     await world();
     w.llm.on({ agentId: w.alex.agent.id, mind: 'brain' }, (req) =>
-      [respond([toolUse('r', 'read_email', { id: 'm1' })]), respond([talk('Dinner Friday at 7?')]), respond([{ type: 'text', text: 'ok' }])][Math.min(stepOf(req), 2)]!,
+      [respond([toolUse('r', 'read_email', { id: 'm1' })]), respond([talk('Dinner Friday at 7?')]), respond([{ type: 'text', text: "I'll check with you first." }])][Math.min(stepOf(req), 2)]!,
     );
     await w.ownerSays(w.alex, 'ask Sam: dinner friday at 7?');
-    expect(await w.actions({ action: 'a2a.release_held' })).toEqual([]);
+    const call = brainCalls(w, w.alex).find((c) => stepOf(c) === 2)!;
+    expect(lastResults(call)[0]!.content).toMatch(/^Not sent\. .*check with them first; do not say it was sent/);
+    expect((await w.actions({ action: 'a2a.release_held' })).map((r) => r.detail.reason)).toEqual(['tainted']);
+    expect(w.textsTo(w.alex.address)).toContain('#1 Tell Sam\'s Violet about “Dinner Friday” (Fri Nov 13, 12:00 AM – Sat Nov 14, 12:00 AM): “Dinner Friday at 7?” Send? Reply yes or no.');
+    expect(await a2aMessages(w)).toEqual([]);
+    expect(envoyCalls(w)).toEqual([]);
+    await w.ownerSays(w.alex, 'yes');
     expect((await a2aMessages(w)).map((m) => m.body)).toEqual(['Dinner Friday at 7?']);
   });
 

@@ -89,7 +89,7 @@ function brain(who: 'alex' | 'sam', req: LlmRequest): LlmBlock[] {
   if (who === 'sam' && said.includes('run on saturday')) {
     return step === 0
       ? [tool('talk_to_agent', { with: 'Alex', topic: 'Run on Saturday morning', brief: 'Alex wants to go for a run on Saturday morning?', window_start: SATURDAY_MORNING.start, window_end: SATURDAY_MORNING.end })]
-      : [text("I've asked Alex's Violet.")];
+      : [text(results(req).some((r) => r.startsWith('Not sent.')) ? "I'll check with you first." : "I've asked Alex's Violet.")];
   }
   return [text('Noted.')];
 }

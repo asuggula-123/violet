@@ -101,6 +101,9 @@ export async function runDemo(opts: DemoOptions): Promise<DemoResult> {
     );
     model.scripted.add(w.sam.agentId);
     await say(w.sam.phone, w.sam, SAY.run);
+    // Sam's history holds the dinner conversation (third-party text), so the opening request
+    // waits for Sam's yes on the exact words (I20).
+    await say(w.sam.phone, w.sam, 'yes');
     model.scripted.delete(w.sam.agentId);
     const leaks = await findLeaks(w);
     await check(

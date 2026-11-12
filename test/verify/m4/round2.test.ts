@@ -151,8 +151,11 @@ describe('M4 verify round 2', () => {
     alexOpensDinner(w);
     honestDinnerEnvoys(w, event);
     await w.ownerSays(w.alex, 'Set up dinner with Sam on Friday evening');
-    // A second conversation (owner-verbatim, so it is released at once) → a second outcome prompt.
+    // A second conversation → a second outcome prompt. The history now holds the first
+    // outcome prompt (tainted), so the opening request is held for a yes (#2, I20).
     await w.ownerSays(w.alex, 'Alex would like dinner with Sam on Friday evening');
+    expect(w.textsTo(w.alex.address).filter((t) => t.startsWith('#2 Tell Sam')).length).toBe(1);
+    await w.ownerSays(w.alex, 'yes 2');
     const prompts = w.textsTo(w.alex.address).filter((t) => /^#\d+ With Sam:/.test(t));
     expect(prompts.length).toBe(2);
     // I19: "Which one?" comes for a yes not right under a prompt; it re-sends each prompt (with the peer text) as its own message.
@@ -160,7 +163,7 @@ describe('M4 verify round 2', () => {
     await w.ownerSays(w.alex, 'yes');
     expect(w.textsTo(w.alex.address).slice(-3).join('\n')).toMatch(/^Which one\?[\s\S]*PEERMARK/);
     await w.ownerSays(w.alex, 'no 1');
-    await w.ownerSays(w.alex, 'no 2');
+    await w.ownerSays(w.alex, 'no 3');
     w.llm.on({ agentId: w.alex.agent.id, mind: 'brain' }, () => respond([{ type: 'text', text: 'hello' }]));
     await w.ownerSays(w.alex, 'hi there');
     const last = w.llm.calls.filter((c) => c.meta.mind === 'brain' && c.meta.agentId === w.alex.agent.id).at(-1)!;
