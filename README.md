@@ -106,8 +106,9 @@ process; `TEST_DATABASE_URL=postgres://… npm run test:pg` runs them on a real 
   Violet writes while this applies counts as such text too, so it does not wear off by
   itself: from then on, every instruction to another agent costs one more tap (the yes).
   When one message makes Violet ask twice, a typed answer counts only for the question
-  right above it: after your first yes, Violet shows the second question again and your
-  next yes answers it (the buttons answer each one directly).
+  right above it: answer the first with yes and its number; your next yes makes Violet
+  show the second again, and the yes under that answers it (the buttons answer each one
+  in one tap).
 - A model fooled by an email or another agent can still tell you untrue things in its own
   reply, including text that looks like Violet's notices or prompts. It cannot act on
   them: only a real prompt and your answer do anything.
